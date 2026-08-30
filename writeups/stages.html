@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stages : ce que j'y ai construit · Mohamed Salhi</title>
+<meta name="description" content="Retour technique sur mes stages : une plateforme de sécurité pilotée par agents IA (Cyberphiles), du firmware temps réel (UIR), et un audit qualité process ISO/TS 16949 (Lear).">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=IBM+Plex+Sans:wght@300;400;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="wu.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230a0b0e'/><text x='50' y='72' font-size='62' text-anchor='middle' fill='%23c9f24d' font-family='monospace' font-weight='700'>M</text></svg>">
+</head>
+<body>
+<div class="bg-glow"></div><div class="bg-grid"></div><div class="bg-grain"></div>
+
+<div class="topbar"><div class="topbar-in">
+  <a class="back" href="../">← Mohamed Salhi</a><span class="sep">/</span>
+  <a class="back" href="../#writeups">write-ups</a><span class="sep">/</span>
+  <span class="here">stages</span>
+</div></div>
+
+<article class="wrap">
+  <div class="kicker">Expérience · Ce que j'y ai construit</div>
+  <h1 class="title">Stages : ce que j'y ai réellement construit</h1>
+  <div class="meta">
+    <span class="m date">2024 – 2026</span>
+    <span class="m">Sécurité &amp; IA · Firmware · Qualité</span>
+  </div>
+  <p class="lead">Trois environnements très différents — une plateforme de sécurité pilotée par agents IA, du firmware temps réel, et un audit qualité industriel. Le fil conducteur : <em>rendre vérifiable</em> ce qui doit l'être.</p>
+
+  <h2><span class="n">01</span> Cyberphiles — Ingénierie Sécurité &amp; IA <span style="color:var(--faint)">· Été 2026</span></h2><div class="rule"></div>
+  <p>Conception et durcissement d'une <b>plateforme de sécurité pilotée par agents IA</b>, du réseau à l'application. Stack : Django Ninja, Next.js/TypeScript, PostgreSQL, MongoDB, Docker — de l'ordre de <b>90k+ lignes</b>.</p>
+  <p>Le défi central : mettre des composants <b>non déterministes</b> (des agents LLM) au contact d'actions sensibles (remédiation réseau, scans de conformité) — et rendre l'ensemble <b>auditable et sûr</b>.</p>
+
+  <h3>Garde-fous autour des agents LLM</h3>
+  <ul>
+    <li><b>Rails anti-injection</b> (directe &amp; indirecte) et <b>cloisonnement par rôle</b> : un agent ne peut agir qu'à l'intérieur de son périmètre.</li>
+    <li><b>Human-in-the-loop</b> : les actions réseau (<code>nftables</code>) passent par une <b>double approbation humaine</b> avant application.</li>
+    <li><b>Garde-fous déterministes</b> autour du non-déterministe : le modèle propose, un contrôle codé en dur dispose.</li>
+  </ul>
+
+  <h3>Audit inaltérable &amp; conformité</h3>
+  <ul>
+    <li><b>Journal d'audit chaîné HMAC</b> : chaque entrée scelle la précédente — <b>toute altération devient détectable</b>.</li>
+    <li>Module <b>ISO 27001</b> : évaluateur automatique produisant des <b>preuves de scan signées cryptographiquement</b>, traçables jusqu'au constat brut.</li>
+  </ul>
+
+  <h3>Démarche adversariale</h3>
+  <p>Je n'ai pas seulement construit — j'ai <b>attaqué ma propre pile</b> avant toute mise en service :</p>
+  <div class="result"><span class="t">Vérification</span> 800+ tests automatisés · 6 scénarios d'attaque · 2 vulnérabilités critiques corrigées</div>
+  <div class="note">
+    <span class="lbl">Principe</span>
+    Autour d'une IA, la sécurité ne peut pas être « le modèle est prudent » : elle doit être <b>vérifiable</b> — approbation humaine, audit inaltérable, preuves signées. C'est ce qui distingue une démo d'un système déployable.
+  </div>
+
+  <h2><span class="n">02</span> Université Internationale de Rabat — Firmware temps réel <span style="color:var(--faint)">· Été 2024</span></h2><div class="rule"></div>
+  <p>Développement <b>embarqué en C sous RTOS</b>, au contact du matériel :</p>
+  <ul>
+    <li>Ordonnancement des tâches et <b>gestion des interruptions</b> sous contraintes temps réel.</li>
+    <li>Pilotage de périphériques et mise au point directement <b>sur cible matérielle</b>.</li>
+  </ul>
+  <p class="small">C'est là que la compréhension bas niveau se forge : registres, timing, et la discipline du debug sans confort. Le socle qui rend le reverse engineering naturel ensuite.</p>
+
+  <h2><span class="n">03</span> Lear Corporation, Tanger — Audit Qualité Process <span style="color:var(--faint)">· Printemps 2024</span></h2><div class="rule"></div>
+  <p>Audit selon la norme <b>ISO/TS 16949</b> en environnement industriel automobile :</p>
+  <ul>
+    <li>Analyse des <b>procédures de test</b> et suivi des non-conformités avec les équipes production / qualité.</li>
+    <li>Optimisation des protocoles de tests de fiabilité.</li>
+  </ul>
+  <p class="small">La rigueur « procédure → preuve → traçabilité » de l'audit qualité se retrouve, transposée, dans mon approche de la conformité sécurité (ISO 27001) et de l'audit inaltérable.</p>
+
+  <h2><span class="n">Fil conducteur</span></h2><div class="rule"></div>
+  <p>Du firmware à l'IA en passant par l'industriel, la même exigence : <b>ne pas se contenter d'affirmer que « ça marche »</b>, mais le prouver — par le test, par l'audit, par la trace signée. C'est la même honnêteté intellectuelle qui me fait documenter, dans mes projets perso, ce qui <i>ne</i> marche pas.</p>
+</article>
+
+<div class="wu-foot"><div class="row">
+  <a href="../#writeups">← tous les write-ups</a>
+  <div class="more">
+    <a href="wow-client-re.html">Game hacking : reversing un client MMO →</a>
+    <a href="nft-tunnel-lpe.html">Linux : UAF noyau → root →</a>
+  </div>
+</div></div>
+</body>
+</html>

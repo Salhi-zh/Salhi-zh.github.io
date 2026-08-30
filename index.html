@@ -225,6 +225,17 @@
   .card-head{display:flex; align-items:center; gap:10px}
   .card.expandable .exp-body > .exp-inner{padding-top:2px}
 
+  /* write-up link cards */
+  .wu-link{display:block; text-decoration:none; color:inherit; cursor:pointer}
+  .wu-link .card-tag{display:flex; align-items:center; gap:8px}
+  .wu-link .arr{margin-left:auto; color:var(--accent); font-family:var(--mono); transition:transform .25s}
+  .wu-link h3{transition:color .25s}
+  .wu-link:hover{border-color:var(--accent)}
+  .wu-link:hover .arr{transform:translateX(5px)}
+  .wu-link:hover h3{color:var(--accent)}
+  .wu-link .rd{font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); margin-top:12px; display:inline-flex; align-items:center; gap:7px}
+  .wu-link:hover .rd{color:var(--accent)}
+
   /* education + langs two-up */
   .grid-2{display:grid; grid-template-columns:1fr 1fr; gap:clamp(24px,4vw,48px)}
   .edu-item{padding:16px 0; border-bottom:1px solid var(--line); display:flex; gap:16px}
@@ -316,7 +327,8 @@
         <a href="#xp"><span class="num">03</span> Expérience</a>
         <a href="#offensive"><span class="num">04</span> Offensif / RE</a>
         <a href="#reseau"><span class="num">05</span> Réseau &amp; Infra</a>
-        <a href="#formation"><span class="num">06</span> Formation</a>
+        <a href="#writeups"><span class="num">06</span> Write-ups</a>
+        <a href="#formation"><span class="num">07</span> Formation</a>
       </nav>
 
       <div class="contact">
@@ -490,8 +502,38 @@
       </div>
     </section>
 
+    <section id="writeups" class="reveal">
+      <div class="sec-head"><span class="sec-num">06</span><span class="sec-title">Write-ups &amp; recherche</span><span class="sec-line"></span><span class="disc-hint">preuves &amp; détails techniques</span></div>
+      <div class="cards">
+        <a class="card js-tilt wu-link wide" href="writeups/wow-client-re.html">
+          <div class="card-tag">Game hacking <span class="badge">RECHERCHE PERSO</span><span class="arr">→</span></div>
+          <h3>Reversing un client MMO — protocole réseau, RC4 &amp; un bug mémoire</h3>
+          <p>RE statique + dynamique d'un client 32-bit : reconstruction du protocole (<code>CDataStore</code>, dispatch), extraction du chiffrement <b style="color:var(--ink);font-weight:500">RC4 vivant en mémoire</b>, découverte d'une lecture hors-bornes dans un parser non gardé, et audit web défensif du panneau associé.</p>
+          <span class="rd">Lire le write-up →</span>
+        </a>
+        <a class="card js-tilt wu-link" href="writeups/nft-tunnel-lpe.html">
+          <div class="card-tag">Linux · noyau <span class="arr">→</span></div>
+          <h3>UAF noyau → root (lab)</h3>
+          <p>Use-after-free <code>nft_tunnel</code> (6.1 KASAN) exploité jusqu'à <code>root</code> : heap spray, drain de quarantaine, <code>call_rcu → commit_creds</code>.</p>
+          <span class="rd">Lire le write-up →</span>
+        </a>
+        <a class="card js-tilt wu-link" href="writeups/ctf-reverse-engineering.html">
+          <div class="card-tag">CTF · RE <span class="arr">→</span></div>
+          <h3>ret2win, unpacking &amp; 80 crackmes</h3>
+          <p>Stack overflow ret2win (Root-Me), dé-packing UPX d'un crackme ELF, et un générateur de ~80 crackmes avec solveurs scriptés.</p>
+          <span class="rd">Lire le write-up →</span>
+        </a>
+        <a class="card js-tilt wu-link wide" href="writeups/stages.html">
+          <div class="card-tag">Expérience <span class="arr">→</span></div>
+          <h3>Stages : ce que j'y ai réellement construit</h3>
+          <p>Le détail technique derrière la plateforme de sécurité IA (garde-fous LLM, audit HMAC, ISO 27001, démarche adversariale), le firmware temps réel, et l'audit qualité industriel.</p>
+          <span class="rd">Lire le write-up →</span>
+        </a>
+      </div>
+    </section>
+
     <section id="formation" class="reveal">
-      <div class="sec-head"><span class="sec-num">06</span><span class="sec-title">Formation &amp; Langues</span><span class="sec-line"></span></div>
+      <div class="sec-head"><span class="sec-num">07</span><span class="sec-title">Formation &amp; Langues</span><span class="sec-line"></span></div>
       <div class="grid-2">
         <div>
           <div class="edu-item">

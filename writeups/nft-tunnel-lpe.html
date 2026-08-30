@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UAF noyau Linux → root : nft_tunnel (lab) · Mohamed Salhi</title>
+<meta name="description" content="Analyse et exploitation en lab d'un use-after-free dans nft_tunnel du noyau Linux jusqu'à l'élévation de privilèges root — heap spray, contournement de quarantaine, détournement de call_rcu vers commit_creds.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=IBM+Plex+Sans:wght@300;400;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="wu.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230a0b0e'/><text x='50' y='72' font-size='62' text-anchor='middle' fill='%23c9f24d' font-family='monospace' font-weight='700'>M</text></svg>">
+</head>
+<body>
+<div class="bg-glow"></div><div class="bg-grid"></div><div class="bg-grain"></div>
+
+<div class="topbar"><div class="topbar-in">
+  <a class="back" href="../">← Mohamed Salhi</a><span class="sep">/</span>
+  <a class="back" href="../#writeups">write-ups</a><span class="sep">/</span>
+  <span class="here">nft-tunnel-lpe</span>
+</div></div>
+
+<article class="wrap">
+  <div class="kicker">Linux · Exploitation noyau</div>
+  <h1 class="title">Use-after-free noyau → root : <code>nft_tunnel</code> (lab)</h1>
+  <div class="meta">
+    <span class="m date">2026</span>
+    <span class="m">Linux 6.1 · Debian 12 · KASAN</span>
+    <span class="m">gdb · pwndbg</span>
+    <span class="m">lab</span>
+  </div>
+  <p class="lead">Un objet libéré sans relâcher ses références laisse des pointeurs pendants dans des SKB parkés. En transformant ce <em>use-after-free</em> en écriture contrôlée du chemin <code>->destroy</code>, j'ai obtenu un shell <em>root</em> reproductible — le tout dans une VM d'entraînement instrumentée.</p>
+
+  <div class="note">
+    <span class="lbl">Cadre</span>
+    Travail d'exploitation <b>en laboratoire</b> (VM dédiée, noyau compilé avec KASAN), à but d'apprentissage de la sécurité noyau. Objectif : comprendre la mécanique d'un UAF réel de bout en bout — pas de cible de production, pas de 0-day revendiqué.
+  </div>
+
+  <h2><span class="n">01</span> Le bug</h2><div class="rule"></div>
+  <p>Dans la destruction d'un objet tunnel de <code>nftables</code>, la routine libère une structure <code>metadata_dst</code> via <code>kfree()</code> <b>sans</b> passer par <code>dst_release()</code>. Résultat : le compteur de références n'est jamais décrémenté proprement, et des SKB déjà parkés (côté TUN) conservent des références vers une zone désormais libre.</p>
+  <pre><code><span class="cm">// schéma du défaut</span>
+nft_tunnel_obj_destroy():
+    kfree(metadata_dst)   <span class="cm">// libère…</span>
+    <span class="cm">// …mais dst_release() manquant → refs pendantes dans les SKB parkés</span></code></pre>
+  <p>On a donc une fenêtre classique : mémoire libérée mais encore atteignable via un autre chemin (la lecture des paquets parkés).</p>
+
+  <h2><span class="n">02</span> Chaîne d'exploitation</h2><div class="rule"></div>
+  <div class="steps">
+    <div class="step">Créer un objet tunnel NFT → allocation de <b>metadata_dst</b>.</div>
+    <div class="step">Émettre un paquet : le hook <code>NF_NETDEV_EGRESS</code> <b>parke le SKB</b> dans l'anneau TUN, référence du <code>dst</code> conservée.</div>
+    <div class="step">Cascade <code>DELTABLE</code> → <code>kfree(metadata_dst)</code> : déclenchement du <b>UAF</b>.</div>
+    <div class="step">Drainer la quarantaine : ~700K cycles alloc/free pour vider la mise en quarantaine.</div>
+    <div class="step">Spray : 512 objets contrôlés dans <code>kmalloc-cg-256</code> pour <b>réoccuper</b> la zone libérée.</div>
+    <div class="step">Lecture TUN → <code>dst_release</code> → <code>call_rcu</code> → <code>dst_destroy</code> → appel de <code>ops->destroy</code>.</div>
+    <div class="step"><code>ops->destroy</code> pointé sur <code>commit_creds</code> → <b>uid = 0</b>.</div>
+    <div class="step">Shell root reproductible.</div>
+  </div>
+
+  <h2><span class="n">03</span> Le point de bascule</h2><div class="rule"></div>
+  <p>La première approche visait un gadget <code>exec_work</code>, mais elle exigeait un chemin valide, bloqué par <code>msg-&gt;security = NULL</code>. Le déblocage a été de rediriger la primitive vers l'appel de destruction RCU et de pointer <code>ops-&gt;destroy</code> directement sur <code>commit_creds</code> :</p>
+  <pre><code><span class="cm">// réoccupation : ops->destroy contrôlé</span>
+ops-&gt;destroy = <span class="ad">0xffffffff81233940</span>   <span class="cm">// commit_creds</span>
+<span class="cm">// appelé via dst_destroy sous call_rcu → escalade des credentials</span></code></pre>
+  <div class="result"><span class="t">Résultat</span> uid=0 — shell root reproductible (Linux 6.1.170-kasan)</div>
+
+  <h2><span class="n">04</span> Ce que KASAN a appris</h2><div class="rule"></div>
+  <p>Compiler le noyau avec <b>KASAN</b> a été décisif : chaque accès pendant transformait un crash opaque en rapport précis (adresse, taille, timeline alloc/free). L'exploitation noyau, c'est autant de la lecture de logs d'instrumentation que de l'écriture d'exploit.</p>
+  <ul>
+    <li><b>Grooming du tas</b> : comprendre la quarantaine (le free ne rend pas la zone immédiatement réutilisable) et la drainer avant le spray.</li>
+    <li><b>Choix du cache</b> : viser le bon slab (<code>kmalloc-cg-256</code>) pour que l'objet de spray recouvre la victime.</li>
+    <li><b>Sélection de gadget</b> : pivoter d'un chemin bloqué (contrainte <code>security</code>) vers un chemin RCU exploitable.</li>
+    <li><b>Discipline</b> : notes itératives des impasses (approche <code>exec_work</code>, callbacks RCU bloqués…) — l'historique des échecs <i>est</i> la solution.</li>
+  </ul>
+
+  <div class="note warn">
+    <span class="lbl">Prise de recul défensive</span>
+    Deux mitigations auraient cassé la chaîne : (1) l'appariement correct <code>alloc/dst_release</code> (le fix du bug lui-même), (2) le durcissement du slab / la randomisation du freelist qui rendent le spring déterministe bien plus dur. C'est exactement la valeur de l'exercice offensif : voir où placer la défense.
+  </div>
+</article>
+
+<div class="wu-foot"><div class="row">
+  <a href="../#writeups">← tous les write-ups</a>
+  <div class="more">
+    <a href="ctf-reverse-engineering.html">CTF &amp; RE →</a>
+    <a href="wow-client-re.html">Game hacking : reversing un client MMO →</a>
+  </div>
+</div></div>
+</body>
+</html>

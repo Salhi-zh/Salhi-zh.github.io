@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reversing un client WoW — protocole, RC4 & un bug mémoire · Mohamed Salhi</title>
+<meta name="description" content="Reverse engineering statique et dynamique d'un client MMO 32-bit : reversal du protocole réseau, extraction du chiffrement RC4 en mémoire, et découverte d'un bug mémoire dans un parser non gardé.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=IBM+Plex+Sans:wght@300;400;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="wu.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230a0b0e'/><text x='50' y='72' font-size='62' text-anchor='middle' fill='%23c9f24d' font-family='monospace' font-weight='700'>M</text></svg>">
+</head>
+<body>
+<div class="bg-glow"></div><div class="bg-grid"></div><div class="bg-grain"></div>
+
+<div class="topbar"><div class="topbar-in">
+  <a class="back" href="../">← Mohamed Salhi</a><span class="sep">/</span>
+  <a class="back" href="../#writeups">write-ups</a><span class="sep">/</span>
+  <span class="here">wow-client-re</span>
+</div></div>
+
+<article class="wrap">
+  <div class="kicker">Game hacking · Reverse engineering</div>
+  <h1 class="title">Reversing un client MMO : protocole réseau, RC4 & un bug mémoire</h1>
+  <div class="meta">
+    <span class="m date">2026</span>
+    <span class="m">Cible : client 32-bit (PandaWoW 5.4.8)</span>
+    <span class="m">IDA · gdb · Python</span>
+    <span class="m">recherche perso</span>
+  </div>
+  <p class="lead">Comment j'ai reconstruit, de zéro, le <em>protocole réseau chiffré</em> d'un client MMO propriétaire — en combinant analyse statique dans IDA et instrumentation dynamique — jusqu'à extraire les clés RC4 vivantes en mémoire et trouver une lecture hors-bornes dans un parser non gardé.</p>
+
+  <div class="note">
+    <span class="lbl">Cadre</span>
+    Recherche personnelle sur ma propre installation, à but d'apprentissage du reverse engineering et de la sécurité mémoire. Cette page décrit la <b>méthodologie et les enseignements</b> — elle ne fournit ni cheat, ni outil prêt à l'emploi, ni exploit contre un service tiers.
+  </div>
+
+  <h2><span class="n">01</span> Approche &amp; outillage</h2><div class="rule"></div>
+  <p>Un client de jeu est un excellent terrain de RE : gros binaire natif, protocole maison, chiffrement, et anti-tamper — tout ce qu'on retrouve en analyse de malware ou d'appli fermée, mais sans documentation. J'ai travaillé sur deux fronts :</p>
+  <ul>
+    <li><b>Statique</b> — désassemblage dans IDA (bases <code>.i64</code>), reconstruction des structures, des tables de dispatch et de la logique de (dé)chiffrement.</li>
+    <li><b>Dynamique</b> — une DLL de log injectée dans le process, posée sur des sites de hook précis pour capturer les paquets avant/après chiffrement, plus des scripts Python lisant la mémoire du process pour extraire l'état runtime.</li>
+  </ul>
+  <p>La boucle « hypothèse statique → vérification dynamique » est ce qui fait avancer : on suppose une structure dans IDA, on la confirme en lisant la mémoire vivante.</p>
+
+  <h2><span class="n">02</span> Le pipeline réseau</h2><div class="rule"></div>
+  <p>Le cœur du travail : comprendre comment un paquet entre, est déchiffré, dispatché et parsé. Les octets utiles transitent par un buffer <code>CDataStore</code> dont j'ai reconstruit la disposition :</p>
+  <pre><code><span class="cm">// CDataStore — reconstruit par RE statique + confirmé en mémoire</span>
++0x00  vtable
++0x04  buffer*        <span class="cm">// données brutes</span>
++0x10  writePos
++0x14  readPos
+body = buffer[readPos .. writePos]
+
+<span class="cm">// sémantique lecteur</span>
+octets : little-endian
+bits   : MSB-first</code></pre>
+  <p>J'ai localisé les points d'entrée émission/réception et posé mes hooks au bon endroit — l'adresse exacte compte : un octet trop loin et on splitte une instruction, ce qui crashe le client.</p>
+  <table class="tbl">
+    <thead><tr><th>Hook</th><th>Rôle</th><th>Ce qu'on lit</th></tr></thead>
+    <tbody>
+      <tr><td><code>SMSG</code></td><td>Serveur → client (dans le dispatch compressé)</td><td>opcode fil + pointeur <code>CDataStore</code></td></tr>
+      <tr><td><code>CMSG</code></td><td>Client → serveur</td><td>base <code>CDataStore</code> ; opcode LE en tête</td></tr>
+    </tbody>
+  </table>
+  <p class="small">Journal des crashs tenu au fil de l'eau (mauvais offset, wrapper pris pour le <code>CDataStore</code>, hook au milieu d'un <code>lea</code> 6 octets…) — documenter les échecs évite de les refaire.</p>
+
+  <h2><span class="n">03</span> Casser le chiffrement : RC4 en mémoire</h2><div class="rule"></div>
+  <p>Le protocole « monde » est chiffré en RC4, avec un contexte distinct par sens de communication. Plutôt que de re-dériver les clés depuis le handshake, je les ai extraites <b>vivantes</b> : le contexte RC4 (S-box + indices <code>i</code>/<code>j</code>) vit dans le process, il suffit de le lire.</p>
+  <pre><code><span class="cm"># extraction de l'état RC4 depuis la mémoire du process</span>
+PacketPipe @ <span class="ad">0x0f1771f8</span>
+  C2S ctx @ +<span class="ad">0x14</span>    <span class="cm"># client → serveur</span>
+  S2C ctx @ +<span class="ad">0x116</span>   <span class="cm"># serveur → client</span>
+<span class="cm"># S-box de 256 octets + indices i,j → RC4 reproductible côté outil</span></code></pre>
+  <p>Une fois le flux déchiffré, l'en-tête « monde » se lit sur un mot de 32 bits :</p>
+  <pre><code><span class="cm">// après déchiffrement RC4 en place</span>
+hdr        = u32 little-endian
+opcode     = hdr &amp; <span class="kw">0x1FFF</span>       <span class="cm">// 13 bits</span>
+payloadSize= hdr &gt;&gt; <span class="kw">13</span>
+paquet     = [opcode u32][payload]</code></pre>
+  <div class="result"><span class="t">Résultat</span> pipeline de capture + décodage vérifié en direct</div>
+  <p>À ce stade je pouvais nommer et décoder les paquets en clair — l'équivalent d'avoir la spec d'un protocole propriétaire non documenté.</p>
+
+  <h2><span class="n">04</span> Un bug mémoire dans un parser non gardé</h2><div class="rule"></div>
+  <p>Comprendre le format, c'est aussi pouvoir le <b>malformer</b>. En auditant les routines de parsing des messages entrants (dont les messages d'addon), j'ai isolé des parsers qui lisent une longueur/contenu depuis le fil <b>sans borner</b> par rapport à la taille réelle du buffer — une <b>lecture hors-bornes</b> déclenchable par un paquet forgé, menant au crash du client.</p>
+  <ul>
+    <li>Audit de la lecture de longueur des messages d'addon (chemin récepteur).</li>
+    <li>Matrice de déclenchement : quelles valeurs mènent au dépassement, lesquelles au chemin par défaut.</li>
+    <li>Vérification de la surface : parsers atteignables vs. gardés par le dispatch.</li>
+  </ul>
+  <div class="note warn">
+    <span class="lbl">Enseignement sécurité</span>
+    C'est le même défaut de classe qu'en analyse d'appli fermée : <b>ne jamais faire confiance à une longueur venue du réseau</b>. La correction est un contrôle de borne <code>lu ≤ restant</code> avant toute copie/lecture. J'ai gardé la découverte au niveau « crash / memory-safety » — pas de développement d'exploit contre un service tiers.
+  </div>
+
+  <h2><span class="n">05</span> Bonus : audit web du panneau associé</h2><div class="rule"></div>
+  <p>En marge du client, j'ai audité (en <b>copie locale</b>) la pile web d'un panneau de gestion de serveur privé. Approche défensive, findings + correctifs :</p>
+  <table class="tbl">
+    <thead><tr><th>Finding</th><th>Impact</th><th>Correctif</th></tr></thead>
+    <tbody>
+      <tr><td><b>Cookie de session</b> sans <code>Secure</code>/<code>HttpOnly</code>, scopé à tout le domaine (<code>.exemple</code>)</td><td>Une XSS sur <i>n'importe quel</i> sous-domaine lit le cookie → prise de contrôle de compte ; transmissible en clair (SSL-strip)</td><td><code>cookie_httponly=1</code>, <code>cookie_secure=1</code>, scope = hôte exact, + HSTS</td></tr>
+      <tr><td>Durée de vie du cookie ~15 ans ; en-têtes <code>HSTS</code>/<code>CSP</code>/<code>X-Frame-Options</code> absents ; <code>X-Powered-By</code> exposé</td><td>Fenêtre de rejeu énorme, clickjacking, fuite de stack</td><td>Durée courte + <code>gc_maxlifetime</code>, en-têtes de sécurité, <code>expose_php=Off</code></td></tr>
+    </tbody>
+  </table>
+  <div class="note danger">
+    <span class="lbl">Divulgation responsable</span>
+    Tests actifs uniquement sur copie locale/staging, jamais contre la production tierce. La cible réelle est anonymisée ici. Un finding exploitable contre un service en ligne ne se publie pas avec un PoC — il se remonte à l'opérateur.
+  </div>
+
+  <h2><span class="n">06</span> Compétences transférables</h2><div class="rule"></div>
+  <ul>
+    <li><b>RE natif</b> : structures, tables de dispatch, cryptographie, anti-tamper dans un gros binaire non documenté.</li>
+    <li><b>Instrumentation dynamique</b> : hooks à l'adresse près, lecture de mémoire process, corrélation statique/dynamique.</li>
+    <li><b>Sécurité mémoire</b> : identifier des lectures hors-bornes déclenchables par entrée non fiable.</li>
+    <li><b>Appsec web</b> : chaînes d'attaque réalistes (XSS → session) et durcissement concret.</li>
+  </ul>
+</article>
+
+<div class="wu-foot"><div class="row">
+  <a href="../#writeups">← tous les write-ups</a>
+  <div class="more">
+    <a href="nft-tunnel-lpe.html">Linux : UAF noyau → root →</a>
+    <a href="ctf-reverse-engineering.html">CTF &amp; RE →</a>
+  </div>
+</div></div>
+</body>
+</html>
