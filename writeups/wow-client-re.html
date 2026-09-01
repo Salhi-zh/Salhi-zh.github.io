@@ -64,6 +64,57 @@
 <span class="cm">// ex: AddMessage @ 0x00475190 — même adresse a chaque session</span></code></pre>
   <p>L'EXE se charge à une <b>base fixe</b> — pas d'ASLR. C'est un cadeau pour l'analyste : chaque adresse trouvée dans IDA peut être lue directement en mémoire sans recalcul de base. C'est aussi une faiblesse de sécurité : aucune randomisation ne protège les fonctions internes.</p>
 
+  <h3>Section map de l'EXE</h3>
+  <table class="tbl">
+    <thead><tr><th>Section</th><th>VA</th><th>Taille</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>.text</code></td><td><code>0x00401000</code></td><td>0x921843 (~9,1 Mo)</td><td>Code du moteur — 70% du binaire</td></tr>
+      <tr><td><code>.rdata</code></td><td><code>0x00D23000</code></td><td>0x1BB109 (~1,7 Mo)</td><td>Strings, RTTI, IAT, vtables</td></tr>
+      <tr><td><code>.data</code></td><td><code>0x00EDF000</code></td><td>0xB3E00 (~720 Ko)</td><td>Globales — etats, configs, Lua state</td></tr>
+      <tr><td><code>.tls</code></td><td><code>0x0131C000</code></td><td>0x9</td><td>Thread-local storage (minimal)</td></tr>
+      <tr><td><code>.rsrc</code></td><td><code>0x0131D000</code></td><td>0x53E9C</td><td>Ressources (icones, manifeste)</td></tr>
+      <tr><td><code>.reloc</code></td><td><code>0x01371000</code></td><td>0x84780</td><td>Relocations (inutiles — base fixe)</td></tr>
+    </tbody>
+  </table>
+  <p>Les relocations existent mais ne servent a rien : la base est fixe. Le <code>.data</code> de 720 Ko contient les globals mutables — dont le pointeur <code>lua_State*</code> a <code>0x00FA5C98</code> qui donne acces a l'ensemble du moteur de scripts.</p>
+
+  <h3>Chaine de demarrage</h3>
+  <pre><code><span class="ad">0x00401000</span>  mainCRTStartup
+    ├── call <span class="ad">0x00A6F84E</span>   <span class="kw">__security_init_cookie</span>
+    ├── call <span class="ad">0x005DAE31</span>   <span class="kw">_initterm_e</span> → <span class="ad">0x005E686A</span> (boucle ctors globaux)
+    └── jmp  <span class="ad">0x00D2285A</span>   <span class="kw">WinMain</span></code></pre>
+
+  <h3>Moteur Lua 5.1.4 embarque</h3>
+  <p>Le client embarque un <b>Lua 5.1.4</b> complet. Le pointeur global <code>lua_State*</code> vit a <code>0x00FA5C98</code> dans le <code>.data</code> de l'EXE — lisible et modifiable par toute DLL chargee. Les fonctions de l'API C sont a adresses fixes :</p>
+  <table class="tbl">
+    <thead><tr><th>VA</th><th>Fonction</th><th>Signature</th></tr></thead>
+    <tbody>
+      <tr><td><code>0x004E8B10</code></td><td><code>lua_pushstring</code></td><td><code>__cdecl(lua_State*, const char*) → const char*</code></td></tr>
+      <tr><td><code>0x004E90A0</code></td><td><code>lua_pcall</code></td><td><code>__cdecl(lua_State*, int nargs, int nresults, int errfunc) → int</code></td></tr>
+      <tr><td><code>0x004E8D40</code></td><td><code>lua_getglobal</code></td><td><code>__cdecl(lua_State*, const char*) → int</code></td></tr>
+      <tr><td><code>0x004E8E30</code></td><td><code>lua_isfunction</code></td><td><code>__cdecl(lua_State*, int idx) → int</code></td></tr>
+      <tr><td><code>0x004E8700</code></td><td><code>lua_settop</code></td><td><code>__cdecl(lua_State*, int idx) → void</code></td></tr>
+    </tbody>
+  </table>
+  <p>Toutes <code>__cdecl</code>, toutes a adresses fixes. Une DLL injectee peut appeler <code>lua_getglobal(L, "SendAddonMessage")</code> puis <code>lua_pcall</code> — <b>en appelant directement les VAs</b>, sans passer par l'IAT ni importer quoi que ce soit. La surface d'attaque est l'ensemble des fonctions Lua exposees par le jeu et par la DLL custom (<code>C_PandaWoWAPI</code>).</p>
+
+  <h3>ChatFrame::AddMessage — signature complete</h3>
+  <pre><code><span class="cm">// ChatFrame::AddMessage — reconstruit par xrefs + strings</span>
+VA: <span class="ad">0x00475190</span>   Convention: <span class="kw">__thiscall</span> (ecx = this)   Ret: <span class="kw">ret 0x18</span>
+<span class="cm">// 6 parametres sur la pile, callee-clean</span>
+<span class="kw">void</span> ChatFrame::AddMessage(
+    <span class="kw">void</span>*    this,       <span class="cm">// ecx</span>
+    <span class="kw">const char</span>* text,    <span class="cm">// [ebp+8]</span>
+    <span class="kw">void</span>*    pColorInfo, <span class="cm">// [ebp+12]</span>
+    uint32_t arg3,       <span class="cm">// [ebp+16] — mode d'affichage</span>
+    uint32_t typeID,     <span class="cm">// [ebp+20] — CHAT_MSG_* type</span>
+    uint32_t backFill,   <span class="cm">// [ebp+24]</span>
+    uint32_t extraData   <span class="cm">// [ebp+28]</span>
+);
+
+Scanner pattern: <span class="st">"55 8B EC 51 57 8B F9 33 C9 39 4D 08 75 0C"</span></code></pre>
+  <p>Le pattern de scanner est la sequence d'octets de l'entree de la fonction — utile pour un outil de hook qui doit trouver la VA meme si une mise a jour modifie la base. Le wrapper Lua correspondant est a <code>0x004932FF</code> (reference par la string <code>"Usage: %s:AddMessage(...)"</code> a <code>0x00D3A578</code>).</p>
+
   <h3>La DLL : pandawow-32.dll</h3>
   <pre><code>pandawow-32.dll   base <span class="ad">0x10000000</span>   <span class="cm">// PE32, ~3,1 Mo, ASLR+DEP</span>
   Build  : <span class="st">2026-06-04, MSVC 14.51 (Visual Studio 2026)</span>
@@ -164,6 +215,41 @@
 
   <h3>Ampleur des hooks : 15+ DLLs, 6+ fonctions</h3>
   <p>L'audit de securite a revele que la DLL injecte au moins <b>15 DLLs custom</b> et hooke au minimum <b>6 fonctions</b> de l'EXE — sans qu'aucune protection d'integrite ne detecte ou ne resiste a ces modifications. Ni Warden (le systeme anti-triche de Blizzard) ni aucun equivalent n'est actif. <code>IsDebuggerPresent</code> est importe mais n'est relie a aucune logique de branchement — pure decoration. La section <code>.00cfg</code> (Control Flow Guard) est presente mais ne couvre que les appels indirects de la DLL elle-meme, pas les hooks poses dans l'EXE.</p>
+
+  <h3>Mon propre moteur de detour</h3>
+  <p>Apres avoir reverse-engineere le moteur de la DLL, j'en ai ecrit un <b>moi-meme</b> — simplifie a l'essentiel. Le code complet (detour.cpp, cross-compile <code>i686-w64-mingw32-g++</code>) :</p>
+  <pre><code><span class="cm">// detour.cpp — moteur 5-byte JMP x86, un hook a la fois</span>
+<span class="kw">static bool</span> WriteMemory(<span class="kw">void</span>* addr, <span class="kw">const void</span>* data, size_t len) {
+    DWORD old;
+    <span class="kw">if</span> (!VirtualProtect(addr, len, PAGE_EXECUTE_READWRITE, &amp;old))
+        <span class="kw">return false</span>;
+    memcpy(addr, data, len);
+    VirtualProtect(addr, len, old, &amp;old);
+    FlushInstructionCache(GetCurrentProcess(), addr, len);
+    <span class="kw">return true</span>;
+}
+
+<span class="kw">static void</span>* BuildTrampoline(<span class="kw">void</span>* target) {
+    <span class="cm">// Trampoline = [5 octets originaux] + [JMP retour a target+5]</span>
+    <span class="kw">auto</span>* tramp = (uint8_t*)VirtualAlloc(
+        <span class="kw">nullptr</span>, 10, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    <span class="kw">if</span> (!tramp) <span class="kw">return nullptr</span>;
+    memcpy(tramp, target, 5);                    <span class="cm">// copie les originaux</span>
+    tramp[5] = <span class="kw">0xE9</span>;                              <span class="cm">// JMP rel32</span>
+    *(int32_t*)(tramp + 6) =
+        (uintptr_t)target + 5 - ((uintptr_t)tramp + 10);
+    <span class="kw">return</span> tramp;
+}
+
+<span class="kw">bool</span> Install(<span class="kw">void</span>* target, <span class="kw">void</span>* detour, <span class="kw">void</span>** original) {
+    *original = BuildTrampoline(target);
+    <span class="kw">if</span> (!*original) <span class="kw">return false</span>;
+    uint8_t jmp[5] = {<span class="kw">0xE9</span>};
+    *(int32_t*)(jmp + 1) =
+        (uintptr_t)detour - ((uintptr_t)target + 5);
+    <span class="kw">return</span> WriteMemory(target, jmp, 5);
+}</code></pre>
+  <p>Volontairement <b>naif</b> par rapport a celui de la DLL : pas de longueur-desassembleur (toujours 5 octets — fonctionne tant que les 5 premiers octets de la cible tombent sur une frontiere d'instruction), pas de <code>SuspendThread</code>, un seul hook a la fois. Suffisant pour l'instrumentation en conditions controlees — mais sur un hook dont la frontiere ne tombe pas a 5, c'est le crash garanti (vecu et documente).</p>
 
   <!-- ════════════════════════════════════════════════════════════════════ -->
   <h2><span class="n">04</span> De la touche Entree au reseau</h2><div class="rule"></div>
@@ -547,6 +633,33 @@ bits   : MSB-first</code></pre>
     </tbody>
   </table>
 
+  <h3>Trame de protocole</h3>
+  <p>Le format de trame que j'ai reconstitue avec mon decodeur Python (<code>wow_decoder.py</code>, ~380 lignes) :</p>
+  <pre><code><span class="cm">// trame reseau — reconstruit par capture + decodage</span>
+[<span class="kw">CRC</span> : 4 octets] [<span class="kw">type/len</span> : 4 octets] [<span class="kw">payload</span>] [<span class="kw">trailer</span>]
+
+Magic: <span class="st">0x816C2057</span>  <span class="cm">// "W l" LE — marqueur de keepalive (18 octets)</span>
+Chat CMSG:  opcode <span class="st">0x07</span>
+Chat SMSG:  opcode <span class="st">0x59663E40</span> <span class="cm">// 40 3E 66 59 en LE — TOUS les types de chat serveur</span>
+Auth:       <span class="st">0x0D</span>=AUTH_CHALLENGE  <span class="st">0x0E</span>=AUTH_SESSION
+            <span class="st">0x0C</span>=AUTH_PROOF      <span class="st">0x12</span>=AUTH_OK</code></pre>
+  <p>Le chat serveur utilise un <b>opcode unique</b> (<code>0x59663E40</code>) pour tous les types (/say, /whisper, /world, /guild) — la distinction se fait par un marqueur de 10 octets dans le payload, pas par l'opcode. Les payloads sont souvent comprimes en <b>zlib</b> (octets <code>0x78 0x9C</code> ou <code>0x78 0x01</code>).</p>
+
+  <h3>Hook du dispatcher de paquets</h3>
+  <p>Pour capturer tout le trafic decode, j'ai ecrit un moniteur (<code>wow_monitor.dll</code>) qui hooke le <b>dispatcher de paquets</b> du client a <code>0x0079B2A0</code> :</p>
+  <pre><code><span class="cm">// wow_monitor.cpp — hook du packet dispatcher</span>
+<span class="kw">typedef void</span> (__thiscall *PacketHandler_t)(
+    <span class="kw">void</span>* session, uint32_t opcode, uint8_t* data, uint32_t len);
+<span class="kw">static</span> PacketHandler_t g_RealHandler = <span class="kw">nullptr</span>;
+
+<span class="kw">void</span> __fastcall PacketHandler_Hook(
+    <span class="kw">void</span>* session, uint32_t edx_dummy,
+    uint32_t opcode, uint8_t* data, uint32_t len) {
+    <span class="cm">// log opcode + hex dump + zlib decompress si compresse</span>
+    <span class="cm">// puis appeler g_RealHandler(session, opcode, data, len)</span>
+}</code></pre>
+  <p>Le hook est <code>__fastcall</code> avec <code>edx_dummy</code> pour consommer le registre <code>edx</code> inutilise par la convention <code>__thiscall</code> de MSVC x86 — une astuce classique en game hacking. Le moniteur decompose les payloads zlib, extrait les strings interessantes (CHAT, SPELL, ITEM, QUEST), et ecrit un dump binaire pour analyse offline.</p>
+
   <h3>Wrappers CryptoAPI : le chemin reel du hash</h3>
   <p>En tracant les appelants de l'IAT CryptoAPI, j'ai identifie deux wrappers internes — utiles pour comprendre comment la cle de session est extraite apres le hash :</p>
   <table class="tbl">
@@ -660,6 +773,37 @@ paquet      = [opcode u32][payload]</code></pre>
   </table>
   <p class="small">Tous ces constats sont issus de l'observation de <b>mon propre client / mon propre compte</b>, en local. Rien n'a ete teste contre la production ni contre les donnees d'autres joueurs.</p>
 
+  <h3>Le mecanisme de la lecture hors-bornes</h3>
+  <p>Le parser de messages d'addon lit une <b>longueur sur 3 octets</b> depuis le payload, puis copie autant d'octets depuis le buffer <code>CDataStore</code> — <b>sans verifier que la longueur tient dans les donnees restantes</b>. Le chemin d'acces : l'appel Lua <code>SendAddonMessage(prefix, message, type, target)</code> — adresse confirmee dans le moteur Lua a <code>0x004E8D40</code> (<code>lua_getglobal</code>) — envoie un <code>CMSG</code> dont le serveur relaie le payload au destinataire en <code>SMSG</code>. Le parser cote reception prend la longueur du message directement du fil sans borne.</p>
+  <p>En inserant <code>0xFF 0xFF 0xFF</code> comme prefixe de longueur dans le corps du message, le parser tente de lire 16 Mo depuis un buffer de quelques centaines d'octets. Resultat : <b>crash du client</b> (<code>ACCESS_VIOLATION</code> en lecture) — reproduit sur mon propre client, contre mon propre compte.</p>
+  <div class="note">
+    <span class="lbl">Impact reel</span>
+    Le message est relaye par le serveur a la cible du <code>WHISPER</code>. Un client non patche qui recoit ce message <b>crash sans interaction</b> — c'est un <b>crash a distance</b> via le canal addon. La correction est un controle <code>msgLen &le; remainingBytes</code> avant la copie. Je n'ai pas developpe l'exploitation au-dela du crash (pas de lecture controlee, pas de RCE) et n'ai teste que contre mon propre personnage.
+  </div>
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <h2><span class="n">10b</span> Surface de donnees : les PoCs MPQ</h2><div class="rule"></div>
+
+  <p>Au-dela de la memoire, j'ai explore une surface differente : les <b>fichiers de donnees</b> du client. Le client WoW charge ses tables de donnees (DBC — DataBase Client) depuis des archives <b>MPQ</b>. L'ordre de chargement est determine par le numero de build dans le nom de fichier : <code>wow-update-base-<i>NNNNN</i>.MPQ</code>, le build le plus eleve gagne. Le build le plus recent reel est 18288.</p>
+
+  <h3>Le principe</h3>
+  <p>En placant un fichier <code>wow-update-base-99999.MPQ</code> dans <code>Data/</code>, le client le charge <b>en dernier</b> et ses fichiers DBC ecrasent ceux des patchs precedents. Aucune signature requise — toutes les archives stock se chargent non signees. La question n'est <b>pas</b> si le client accepte la modification (il l'accepte toujours), mais si le <b>serveur re-valide</b> contre ses propres donnees.</p>
+
+  <h3>Trois PoCs, trois controles serveur</h3>
+  <table class="tbl">
+    <thead><tr><th>PoC</th><th>DBC modifiee</th><th>Test serveur</th></tr></thead>
+    <tbody>
+      <tr><td><code>instant_cast</code></td><td><code>SpellCastTimes.dbc</code> — tous les temps a 0 ms</td><td>Le serveur applique-t-il son propre <code>cast_time</code> ?</td></tr>
+      <tr><td><code>infinite_range</code></td><td><code>SpellRange.dbc</code> — portee max a 50 000 yd</td><td>Le serveur verifie-t-il la distance / la ligne de vue ?</td></tr>
+      <tr><td><code>zero_cooldown</code></td><td><code>SpellCooldowns.dbc</code> — recovery+GCD a 0</td><td>Le serveur applique-t-il son propre cooldown ?</td></tr>
+    </tbody>
+  </table>
+  <p>Le serveur garde sa <b>propre</b> copie de chaque DBC — la modification cote client ne change que ce que le client <b>croit et envoie</b>. L'objectif est de verifier si le core serveur fait confiance au client (vuln) ou re-valide (safe). La reponse definitive se lit dans le paquet serveur : <code>SMSG_SPELL_GO</code> = accepte (vuln), <code>SMSG_CAST_FAILED</code> avec <code>SPELL_FAILED_OUT_OF_RANGE</code> / <code>SPELL_FAILED_NOT_READY</code> = rejete (safe).</p>
+  <div class="note">
+    <span class="lbl">Methodologie</span>
+    Les PoCs sont conçus pour un <b>realm de test</b>, sur un personnage jetable. Ils prouvent qu'un joueur ordinaire, sans DLL injectee ni hack memoire — juste un fichier <code>.MPQ</code> dans un dossier — peut tenter de forcer des actions illegales. C'est le <b>modele de menace realiste</b> pour la base de joueurs. Les archives MPQ n'ont pas besoin d'etre signees, le regex du client (<code>wow-update-(\w+)-(\d+)\.mpq</code>) est confirme dans l'EXE.
+  </div>
+
   <!-- ════════════════════════════════════════════════════════════════════ -->
   <h2><span class="n">11</span> Bonus : audit web du panneau associe</h2><div class="rule"></div>
 
@@ -685,8 +829,10 @@ paquet      = [opcode u32][payload]</code></pre>
     <li><b>Boucle statique/dynamique</b> : oser l'hypothese dans IDA, puis la confronter a la memoire vivante — et traiter une refutation (les hooks muets → « c'est du TLS via SSPI/Schannel ») comme le resultat le plus precieux. Le parcours SRP6 → silence des hooks → decouverte SSPI est un cas d'ecole de revision d'hypothese en RE.</li>
     <li><b>Analyse de DLL injectee</b> : cartographier un PE32 inconnu de 3,1 Mo, identifier ses sections non-standard (<code>.detourc</code>/<code>.detourd</code>), reconstituer son moteur de hook, inventorier les sous-systemes injectes (Lua API, hardcore, transmog, premium, spectateur, ToyBox/Heirlooms, Discord, auto-login, CDN, GameUI), et comprendre ses interactions avec l'EXE hote — y compris les classes de bootstrap (<code>DllCliInitial</code>, <code>ClientSetupFeatures</code>) et les 8+ DBC databases chargees a l'init.</li>
     <li><b>Instrumentation a l'octet pres</b> : detours inline, trampolines, longueur-desassemblage, lecture de memoire process — et la comprehension de <i>pourquoi</i> l'adresse exacte du hook fait la difference entre observation et crash.</li>
-    <li><b>Securite memoire</b> : identifier une lecture hors-bornes declenchable par une entree non fiable, la caracteriser au niveau crash, et en tirer la mitigation (borner toute longueur reseau).</li>
+    <li><b>Securite memoire</b> : identifier une lecture hors-bornes declenchable par une entree non fiable (3 octets de longueur non bornes dans le parser d'addon → crash a distance), la caracteriser au niveau crash, et en tirer la mitigation (borner toute longueur reseau).</li>
     <li><b>Audit de surface client</b> : evaluee systematiquement avec severite (CRITIQUE/HAUTE/MOYENNE/BASSE) — build debug en production, Lua API non gardees (<code>DiedPermanently</code>, <code>ChangeEnables</code>, fonctions de debug), absence d'anti-tamper, injection persistante d'addon, chat spoofing, CDN sans TLS, <code>SendInput</code> automation — documentes avec le niveau de detail necessaire a un rapport de vulnerabilite professionnel.</li>
+    <li><b>Surface de donnees</b> : les PoCs MPQ (DBC overrides par load-order win, build 99999 vs. 18288) testent si le serveur re-valide cast_time, portee, cooldown ou fait confiance au client — le modele de menace realiste pour un joueur sans injection memoire.</li>
+    <li><b>Outillage maison</b> : moteur de detour x86 (trampoline + 5-byte JMP), decodeur de protocole Python (~380 lignes, CRC/zlib/opcodes), moniteur de paquets par hook du dispatcher (<code>__thiscall</code> a <code>0x0079B2A0</code>) — trois outils construits <i>pour ce projet</i>, pas des outils existants colles.</li>
     <li><b>Appsec web</b> : derouler une chaine d'attaque realiste (XSS de sous-domaine → vol de cookie → session) et proposer un durcissement concret — en restant du cote defensif et responsable.</li>
     <li><b>Lecture d'un environnement adverse</b> : sous Wine, comprendre pourquoi l'IAT se contourne et ou passent reellement les appels — la meme finesse que pour un malware qui resout ses API dynamiquement via <code>LoadLibrary</code>/<code>GetProcAddress</code>. La resolution dynamique de <code>secur32.dll</code> par SSPI_Init est structurellement identique a un loader de malware qui resout ses imports a la volee.</li>
   </ul>
