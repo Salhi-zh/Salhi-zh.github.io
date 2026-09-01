@@ -60,7 +60,8 @@
   <h3>L'EXE : pandawow-32.exe</h3>
   <pre><code>pandawow-32.exe   base <span class="ad">0x00400000</span>   <span class="cm">// 32-bit, base FIXE — pas d'ASLR</span>
 <span class="cm">// toutes les adresses statiques d'IDA sont directement valides en mémoire</span>
-<span class="cm">// simplifie énormément l'instrumentation et la lecture mémoire</span></code></pre>
+<span class="cm">// simplifie énormément l'instrumentation et la lecture mémoire</span>
+<span class="cm">// ex: AddMessage @ 0x00475190 — même adresse a chaque session</span></code></pre>
   <p>L'EXE se charge à une <b>base fixe</b> — pas d'ASLR. C'est un cadeau pour l'analyste : chaque adresse trouvée dans IDA peut être lue directement en mémoire sans recalcul de base. C'est aussi une faiblesse de sécurité : aucune randomisation ne protège les fonctions internes.</p>
 
   <h3>La DLL : pandawow-32.dll</h3>
@@ -83,7 +84,7 @@
   <table class="tbl">
     <thead><tr><th>Section</th><th>VA</th><th>Taille</th><th>Role</th></tr></thead>
     <tbody>
-      <tr><td><code>.text</code></td><td><code>0x10001000</code></td><td>~2,7 Mo</td><td>Code principal</td></tr>
+      <tr><td><code>.text</code></td><td><code>0x10001000</code></td><td>0x2B146A (~2,7 Mo)</td><td>Code principal</td></tr>
       <tr><td><code>.rdata</code></td><td><code>0x102B3000</code></td><td>0x3CECF</td><td>Strings, RTTI, constantes</td></tr>
       <tr><td><code>.data</code></td><td><code>0x102F0000</code></td><td>0x3E00</td><td>Globales writable</td></tr>
       <tr><td><code>.idata</code></td><td><code>0x102FC000</code></td><td>0x10B4</td><td>Tables d'import</td></tr>
@@ -101,15 +102,19 @@
   <h3>Ce que la DLL modifie</h3>
   <p>La DLL injecte un ecosysteme complet dans le client. Voici les sous-systemes identifies par RTTI et strings dans <code>.rdata</code> :</p>
   <ul>
-    <li><b>C_PandaWoWAPI</b> — namespace Lua custom enregistre dans l'environnement du jeu, exposant des fonctions comme <code>CanAutoLogin</code>, <code>GetAutoLoginCredentials</code>, <code>ChangeEnables</code>, <code>FlashClientIcon</code>, <code>TreatScenarioAsDungeon</code>.</li>
-    <li><b>Hardcore mode</b> — systeme de permadeath complet avec RTTI (<code>ClientHardcoreDuelComplete</code>, <code>ClientHardcoreDeathAlert</code>, <code>ClientHardcoreMaxLevelAlert</code>...), causes de mort enumerees (PVP, DUEL, CREATURE, FALLING, DROWNING, FATIGUE, SLIME, LAVA, FIRE), et restrictions (pas d'hotel des ventes, pas de guilde, pas de mail pour les hardcores).</li>
-    <li><b>Transmog etendu</b> — chargement de databases DBC supplementaires (<code>TransmogHoliday</code>, <code>TransmogIllusion</code>, <code>TransmogSet</code>...), systeme d'incarnations, RTTI <code>AccountTransmogUpdate</code> / <code>WardrobeInitialize</code>.</li>
-    <li><b>Premium / store</b> — flags <code>premiumRequired</code>, <code>IsPremiumAppearance</code>, string <code>TRANSMOG_REQUIRED_PREMIUM</code>, evenement <code>STORE_BALANCE_UPDATED</code>.</li>
-    <li><b>Spectateur</b> — <code>C_Spectator</code>, <code>SpectatePlayerResult</code>, filtres de champs de bataille.</li>
+    <li><b>C_PandaWoWAPI</b> (string @ <code>0x102B99E8</code>) — namespace Lua custom enregistre dans l'environnement du jeu, exposant des fonctions comme <code>CanAutoLogin</code>, <code>GetAutoLoginCredentials</code>, <code>ChangeEnables</code>, <code>FlashClientIcon</code>, <code>TreatScenarioAsDungeon</code>.</li>
+    <li><b>Hardcore mode</b> — systeme de permadeath complet avec RTTI (<code>ClientHardcoreDuelComplete</code>, <code>ClientHardcoreDeathAlert</code> @ <code>0x102F0D54</code>, <code>ClientHardcoreMaxLevelAlert</code>, <code>ClientHardcoreErrorMessage</code> @ <code>0x102F0D20</code>, <code>ClientHardcoreDuelRequested</code>, <code>ClientCanHardcoreDuelResult</code>...), causes de mort enumerees (PVP, DUEL, CREATURE, FALLING, DROWNING, FATIGUE, SLIME, LAVA, FIRE), et restrictions (pas d'hotel des ventes, pas de guilde, pas de mail, pas de trade avec les non-hardcore, pas de BG/donjon, seuls les duels a mort autorises pour les hardcores).</li>
+    <li><b>Transmog etendu</b> — chargement de databases DBC supplementaires (<code>TransmogHoliday.dbc</code>, <code>TransmogIllusion.dbc</code>, <code>TransmogSet.dbc</code>, <code>TransmogSetGroup.dbc</code>, <code>TransmogSetItem.dbc</code>, <code>ItemNameDescriptionTransmog.dbc</code>, <code>UiCamFbackTransmogWeapon.dbc</code>, <code>UiCamFbackTransmogChrRace.dbc</code>), systeme d'incarnations (<code>Incarnation.dbc</code>, <code>IncarnationsApply</code>), RTTI <code>AccountTransmogUpdate</code> @ <code>0x102F0F0C</code> / <code>WardrobeInitialize</code> @ <code>0x102F0F38</code>. Variables de config exposees : <code>transmogCurrentSpecOnly</code>, <code>incarnationTransmogCurrentSpecOnly</code>, <code>lastTransmogOutfitIDSpec[1-4]</code>, <code>transmogrifySourceFilters</code>, <code>wardrobeSourceFilters</code>, <code>wardrobeSetsFilters</code>, <code>transmogrifyShowCollected</code>/<code>ShowUncollected</code>, <code>missingTransmogSourceInItemTooltips</code>.</li>
+    <li><b>Premium / store</b> — flags <code>premiumRequired</code>, <code>IsPremiumAppearance</code> / <code>HasPremiumSources</code>, <code>appendPremiumTransError</code>, string <code>TRANSMOG_REQUIRED_PREMIUM</code>, evenement <code>STORE_BALANCE_UPDATED</code>, RTTI <code>ClientBalanceInfo</code> @ <code>0x102F0C00</code>.</li>
+    <li><b>Spectateur</b> — <code>C_Spectator</code>, <code>SpectatePlayerResult</code>, filtres de champs de bataille (<code>SetFilterBattleground</code>/<code>SetFilterWarGames</code>/<code>GetFilterWarGames</code>), evenements <code>UPDATE_BATTLEFIELD_SCORE_SPECTATOR</code>/<code>SPECTATOR_UPDATED</code>.</li>
+    <li><b>ToyBox / Montures / Heritages</b> — RTTI : <code>ToyUseResult</code>, <code>ToyInfo</code>, <code>ToyBoxSearcher</code>, <code>Heirloom</code>, <code>HeirloomFilter</code>, <code>HeirloomSearcher</code>, <code>AccountMountUpdate</code> @ <code>0x102F0E0C</code>, <code>AccountToyUpdate</code> @ <code>0x102F0EA8</code>. API Lua <code>C_Heirloom</code> avec <code>CreateHeirloom</code>, <code>IsHeirloomSourceValid</code>, <code>PlayerHasHeirloom</code>, <code>GetHeirloomInfo</code>, <code>GetHeirloomLink</code>, <code>UpdateHeirlooms</code>. API Lua <code>C_IncarnationsCollection</code> avec <code>GetIncarnations</code>/<code>UpdateIncarnations</code>. DBC supplementaires : <code>Mount.dbc</code>, <code>Toy.dbc</code>, <code>Heirloom.dbc</code>.</li>
     <li><b>Discord Rich Presence</b> — charge <code>discord_game_sdk_x86.dll</code>, appelle <code>DiscordCreate</code> / <code>UpdateDiscordActivity</code>.</li>
-    <li><b>Auto-login</b> — <code>CanAutoLogin</code> / <code>GetAutoLoginCredentials</code>, flag CLI <code>-launcherlogin</code>, lecture de credentials depuis le registre via <code>RegOpenKeyExW</code>/<code>RegQueryValueExW</code>.</li>
-    <li><b>CDN de patches</b> — URL en dur dans <code>.rdata</code> : <code>cdn.pandawow.me:90/patch_dev.php</code> — HTTP sans TLS, port non-standard.</li>
+    <li><b>Auto-login</b> — <code>CanAutoLogin</code> (string @ <code>0x102B9B60</code>) / <code>GetAutoLoginCredentials</code> (string @ <code>0x102B9B70</code>), flag CLI <code>-launcherlogin</code>, lecture de credentials depuis le registre via <code>RegOpenKeyExW</code>/<code>RegQueryValueExW</code>.</li>
+    <li><b>CDN de patches</b> — URL en dur dans <code>.rdata</code> (@ <code>0x102B31D8</code>) : <code>cdn.pandawow.me:90/patch_dev.php</code> — HTTP sans TLS, port non-standard.</li>
+    <li><b>GameUI</b> — hooks dans <code>GameUI.cpp</code> : <code>CGGameUI::SetCursorToyItemID</code>, <code>GetDetailedGameInfo</code>, modifications du systeme de socketing (Empty Socket UI, sockets prismatiques), tables de prix custom (<code>ImportPrice*.dbc</code>).</li>
+    <li><b>Initialisation</b> — RTTI <code>DllCliInitial</code> @ <code>0x102F0DE8</code>, <code>ClientSetupFeatures</code> @ <code>0x102F0CF8</code> — classes de bootstrap qui orchestrent la pose des hooks et l'enregistrement Lua au chargement.</li>
   </ul>
+  <p>Le titre de fenetre confirme l'identite du client : <code>"PandaWoW | Mist of Pandaria"</code> (string @ <code>0x102B5700</code>).</p>
   <p>Autrement dit, le client se hooke deja lui-meme. Comprendre <i>son</i> moteur de detour donne gratuitement le mode d'emploi pour poser mes propres hooks au bon endroit.</p>
 
   <!-- ════════════════════════════════════════════════════════════════════ -->
@@ -125,10 +130,15 @@
       <tr><td><code>VirtualProtect</code> / <code>VirtualProtectEx</code></td><td>Rendre le code cible writable avant patch</td></tr>
       <tr><td><code>FlushInstructionCache</code></td><td>Vider le cache apres ecriture du JMP</td></tr>
       <tr><td><code>VirtualAlloc</code> / <code>VirtualFree</code></td><td>Allouer/liberer les buffers trampoline</td></tr>
+      <tr><td><code>VirtualQuery</code> / <code>VirtualQueryEx</code></td><td>Scanner la memoire pour trouver les zones hookables</td></tr>
       <tr><td><code>GetThreadContext</code> / <code>SetThreadContext</code></td><td>Modifier les registres d'un thread</td></tr>
       <tr><td><code>SuspendThread</code> / <code>ResumeThread</code></td><td>Geler les threads pendant la pose du hook</td></tr>
-      <tr><td><code>GetModuleHandleA</code></td><td>Trouver la base du module cible</td></tr>
+      <tr><td><code>GetModuleHandleA</code> / <code>GetModuleHandleW</code></td><td>Trouver la base du module cible</td></tr>
       <tr><td><code>GetProcAddress</code></td><td>Resoudre les fonctions a hooker</td></tr>
+      <tr><td><code>LoadLibraryA</code> / <code>LoadLibraryExA</code></td><td>Charger des DLLs supplementaires (Discord SDK, etc.)</td></tr>
+      <tr><td><code>CreateThread</code></td><td>Lancer des threads de travail (hooks asynchrones)</td></tr>
+      <tr><td><code>IsDebuggerPresent</code></td><td>Anti-debug (importe mais <b>inutilise</b> — pas de branche conditionnelle dessus)</td></tr>
+      <tr><td><code>Sleep</code></td><td>Synchronisation de threads pendant les operations de hook</td></tr>
     </tbody>
   </table>
   <p>Les strings d'erreur confirment un cycle de vie complet de hook : <code>"Client hook allocation failure"</code>, <code>"Client hook re-allocation failure"</code>, <code>"Client hook free failure"</code>. Le heap CRT de debug valide chaque allocation — crash garanti si un buffer deborde, ce qui documente indirectement les limites du moteur.</p>
@@ -152,6 +162,9 @@
 
   <p>L'observation du hook engine en action revele aussi un detail de synchronisation : <code>SuspendThread</code> / <code>ResumeThread</code> sont importes pour geler les threads du client pendant la pose, evitant qu'un thread en cours d'execution de la fonction cible ne tombe sur un JMP partiellement ecrit. <code>GetThreadContext</code> / <code>SetThreadContext</code> permettent de deplacer un thread dont le PC serait dans la zone patchee — couverture complete du cas de course.</p>
 
+  <h3>Ampleur des hooks : 15+ DLLs, 6+ fonctions</h3>
+  <p>L'audit de securite a revele que la DLL injecte au moins <b>15 DLLs custom</b> et hooke au minimum <b>6 fonctions</b> de l'EXE — sans qu'aucune protection d'integrite ne detecte ou ne resiste a ces modifications. Ni Warden (le systeme anti-triche de Blizzard) ni aucun equivalent n'est actif. <code>IsDebuggerPresent</code> est importe mais n'est relie a aucune logique de branchement — pure decoration. La section <code>.00cfg</code> (Control Flow Guard) est presente mais ne couvre que les appels indirects de la DLL elle-meme, pas les hooks poses dans l'EXE.</p>
+
   <!-- ════════════════════════════════════════════════════════════════════ -->
   <h2><span class="n">04</span> De la touche Entree au reseau</h2><div class="rule"></div>
 
@@ -160,8 +173,8 @@
   <h3>Variante 1 : appui sur Entree dans le champ password</h3>
   <div class="steps">
     <div class="step">La fenetre recoit <code>WM_KEYDOWN(VK_RETURN)</code> ; le <code>WndProc</code> la route vers le controle de saisie.</div>
-    <div class="step"><b>CSimpleEditBox</b> (<code>EditBox.cpp</code> @ <span class="ad">0xD35F84</span>) detecte <code>VK_RETURN</code> dans <code>OnKeyDown</code> et declenche l'evenement <code>onenterpressed</code> (@ <span class="ad">0xD33A40</span>).</div>
-    <div class="step">Le pont <b>FrameScript</b> (<code>FrameScript.cpp</code> @ <span class="ad">0xD32A34</span>) propage l'evenement vers Lua : <code>TriggerEvent("onenterpressed")</code>. Ce pont passe aussi par <code>CSimpleFrameScript.cpp</code> (@ <span class="ad">0xD3907C</span>) et <code>SharedScriptEvents.cpp</code> (@ <span class="ad">0xD866E8</span>).</div>
+    <div class="step"><b>CSimpleEditBox</b> (<code>EditBox.cpp</code> @ <span class="ad">0xD35F84</span>, header <code>CSimpleEditBox.h</code> @ <span class="ad">0xD34F60</span>) detecte <code>VK_RETURN</code> dans <code>OnKeyDown</code> et declenche l'evenement <code>onenterpressed</code> (@ <span class="ad">0xD33A40</span>).</div>
+    <div class="step">Le pont <b>FrameScript</b> (<code>FrameScript.cpp</code> @ <span class="ad">0xD32A34</span>) propage l'evenement vers Lua : <code>TriggerEvent("onenterpressed")</code>. Ce pont passe aussi par <code>CSimpleFrameScript.cpp</code> (@ <span class="ad">0xD3907C</span>) et <code>SharedScriptEvents.cpp</code> (@ <span class="ad">0xD866E8</span>). L'enregistrement et le desenregistrement d'evenements utilisent <code>RegisterEvent</code> (@ <span class="ad">0xD38F6C</span>) et <code>UnregisterEvent</code> (@ <span class="ad">0xD38F48</span>), avec un handler generique <code>onevent</code> (@ <span class="ad">0xD33A90</span>).</div>
     <div class="step">Le handler Lua (<code>GlueXML/AccountLogin.lua</code>) appelle <code>DefaultServerLogin(accountEditBox:GetText(), passwordEditBox:GetText())</code>.</div>
     <div class="step">Le <b>DefaultServerLogin</b> C++ (reference via la chaine d'usage @ <span class="ad">0xD6032C</span>) demarre la machine a etats <b>GruntLogin</b>.</div>
   </div>
@@ -176,12 +189,33 @@
   <h3>Variante 3 : auto-login via la DLL</h3>
   <div class="steps">
     <div class="step">La DLL hooke <code>CanAutoLogin</code> (string @ <span class="ad">0x102B9B60</span>) pour renvoyer <code>TRUE</code>.</div>
-    <div class="step"><code>GetAutoLoginCredentials</code> (string @ <span class="ad">0x102B9B70</span>) fournit les credentials — probablement lus depuis le registre (<code>RegOpenKeyExW</code>/<code>RegQueryValueExW</code> importes par la DLL).</div>
+    <div class="step"><code>GetAutoLoginCredentials</code> (string @ <span class="ad">0x102B9B70</span>) fournit les credentials — lus depuis le registre Windows (<code>RegOpenKeyExW</code>/<code>RegQueryValueExW</code> importes par la DLL). Le flag CLI <code>-launcherlogin</code> active ce chemin depuis le launcher.</div>
     <div class="step"><code>AuthUI_SetupLoginScreen</code> detecte le mot de passe sauve via <code>IsPassword()</code> (@ <span class="ad">0xD3A1A4</span>) et appelle <code>sub_46E6E3(true)</code> → auto-submit.</div>
     <div class="step"><code>DefaultServerLogin(savedName, savedPassword)</code> est appele — la machine a etats demarre sans intervention utilisateur.</div>
   </div>
 
-  <p>L'EditBox expose aussi un ecosysteme complet d'evenements clavier : <code>onkeydown</code> (@ <code>0xD33A84</code>), <code>onkeyup</code> (@ <code>0xD33A7C</code>), <code>onchar</code> (@ <code>0xD33AAC</code>), <code>onenter</code> (@ <code>0xD33B0C</code> — focus gagne), avec des fonctions de controle comme <code>propagateKeyboardInput</code> (@ <code>0xD34418</code>), <code>enableKeyboard</code> (@ <code>0xD34488</code>) et <code>SetFocus</code> (@ <code>0xD37240</code>). Cet inventaire est utile pour comprendre comment un addon malveillant pourrait interagir avec l'ecran de login — ou comment le detecter.</p>
+  <h3>Variante 4 (evaluee) : ecriture directe dans le registre</h3>
+  <p>Puisque la DLL lit les credentials depuis le registre, une quatrieme voie consiste a ecrire directement les identifiants dans la cle de registre cible — le client s'auto-connecte au prochain lancement, sans hook ni injection. Cette approche est la plus discreet car elle n'ecrit rien dans l'espace memoire du process.</p>
+
+  <p>L'EditBox expose un ecosysteme complet de controle clavier au-dela du login :</p>
+  <table class="tbl">
+    <thead><tr><th>VA</th><th>Fonction</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>0xD33A84</code></td><td><code>onkeydown</code></td><td>Touche enfoncee</td></tr>
+      <tr><td><code>0xD33A7C</code></td><td><code>onkeyup</code></td><td>Touche relachee</td></tr>
+      <tr><td><code>0xD33AAC</code></td><td><code>onchar</code></td><td>Caractere saisi</td></tr>
+      <tr><td><code>0xD33B0C</code></td><td><code>onenter</code></td><td>Focus gagne</td></tr>
+      <tr><td><code>0xD37240</code></td><td><code>SetFocus</code></td><td>Definir le focus</td></tr>
+      <tr><td><code>0xD34418</code></td><td><code>propagateKeyboardInput</code></td><td>Propager les frappes aux enfants</td></tr>
+      <tr><td><code>0xD34488</code></td><td><code>enableKeyboard</code></td><td>Activer/desactiver le clavier</td></tr>
+      <tr><td><code>0xD38CA4</code></td><td><code>EnableKeyboard</code> (Lua)</td><td>Expose a Lua : activer le clavier</td></tr>
+      <tr><td><code>0xD38C90</code></td><td><code>IsKeyboardEnabled</code> (Lua)</td><td>Expose a Lua : etat du clavier</td></tr>
+      <tr><td><code>0xD38B54</code></td><td><code>SetPropagateKeyboardInput</code></td><td>Flag de propagation</td></tr>
+      <tr><td><code>0xD38B38</code></td><td><code>GetPropagateKeyboardInput</code></td><td>Lire le flag de propagation</td></tr>
+      <tr><td><code>0xD3A684</code></td><td><code>IsControlKeyDown</code></td><td>Verification de touche modificatrice</td></tr>
+    </tbody>
+  </table>
+  <p>Cet inventaire est utile pour comprendre comment un addon malveillant pourrait interagir avec l'ecran de login — ou comment le detecter. La fonction <code>SetPassword</code> (@ <code>0xD3A1B0</code>) stocke le mot de passe sur l'objet compte, et <code>IsPassword</code> (@ <code>0xD3A1A4</code>) verifie sa presence. Plus globalement, l'absence de restrictions sur l'acces Lua a ces fonctions signifie que l'automation par <code>SendInput</code> (WM_KEYDOWN/WM_CHAR depuis l'exterieur) ou par addon est triviale.</p>
 
   <p>Les evenements specifiques au login incluent <code>LOGIN_ENTER_PASSWORD</code> (@ <code>0xD5DD5C</code>), <code>LOGIN_ENTER_NAME</code> (@ <code>0xD5DD74</code>), <code>SetSavedAccountName</code> (@ <code>0xD60164</code>) et <code>GetSavedAccountName</code> (@ <code>0xD60178</code>).</p>
 
@@ -190,14 +224,50 @@
 
   <p>A partir de <code>DefaultServerLogin</code>, le login est pilote par le module Blizzard interne <b>« Grunt »</b> (<code>GruntLogin.cpp</code> @ <span class="ad">0xDDE7E0</span>, <code>GruntClient.cpp</code> @ <span class="ad">0xDDE91C</span>). C'est une machine a etats dont chaque etat laisse une chaine dans le binaire — le meilleur point d'accroche pour retrouver la fonction qui execute la machine (un gros <code>switch</code> sur l'etat). Methode IDA : <code>Search → Text → "LOGIN_STATE_INITIALIZED" → Ctrl+X</code> — la fonction referencant ces chaines <i>est</i> la machine a etats.</p>
 
-  <p>L'architecture du login se decompose en trois couches de session distinctes :</p>
+  <h3>Architecture des couches de session</h3>
+  <p>Le login se decompose en trois couches de session distinctes, plus un gestionnaire d'ecran qui orchestre les transitions visuelles :</p>
+  <pre><code><span class="cm">// architecture de session — reconstituee par RTTI + strings + xrefs</span>
+[Login Screen]  ← GlueXML/AccountLogin.lua
+       │
+       ↓ account name + password
+[<span class="kw">CGlueMgr</span>]      ← CGlueMgr.cpp (<span class="ad">0xD5DBCC</span>)
+       │           Loading → AccountLogin → RealmList → CharacterSelect → EnterWorld
+       ↓
+[<span class="kw">BattlenetLogin</span>] ← BattlenetLogin.cpp (<span class="ad">0xDC6A38</span>)
+       │
+       ↓ TCP connect to Sunken (login server)
+[<span class="kw">Creep/Sunken</span>]   ← Battlenet::Server::Creep::Sunken
+       │
+       ↓ TLS via SSPI/Schannel (EncryptMessage/DecryptMessage)
+[<span class="kw">SRP6 Auth</span>]      ← AuthChallenge.cpp
+       │
+       ├─ SHA1(SRP_S) → 20-byte session key
+       ├─ Stored in <span class="kw">Battlenet::WoW::SessionKey</span> object
+       └─ Imported as RC4 key via CryptImportKey
+       │
+       ↓
+[Realm List] → [Character Select] → [<span class="kw">Enter World</span>] (RC4)</code></pre>
+
   <ul>
     <li><b>AuthSession</b> — authentification SRP6 + derivation de cle (geree par Grunt)</li>
     <li><b>WorldSession</b> — chiffrement des paquets du monde via RC4 (<code>CryptImportKey</code>/<code>CryptEncrypt</code>)</li>
-    <li><b>ComSatSession</b> — sessions voix/chat Battle.net (couches ComSat/Creep)</li>
+    <li><b>ComSatSession</b> — sessions voix/chat Battle.net (couches ComSat/Creep), avec son propre secret partage (<code>Battlenet::Client::ComSat::Secret</code> @ <code>0xE09CE5</code>)</li>
   </ul>
 
-  <p>Le serveur de login interne s'appelle <b>Sunken</b> — nom de code decouvert par RTTI (<code>Sunken@Server@Creep</code> @ <code>0xE63A28</code>, <code>Resolver@Sunken@Server@Creep</code> @ <code>0xE63B78</code>, <code>Manager@Sunken@Server@Creep</code> @ <code>0xE63C58</code>). Le client se connecte via le protocole <code>Battlenet::Server::Creep</code>, le gestionnaire d'ecran etant <code>CGlueMgr</code> (<code>CGlueMgr.cpp</code> @ <code>0xD5DBCC</code>) qui controle les transitions Loading → AccountLogin → RealmList → CharacterSelect → EnterWorld. L'evenement <code>BN_CONNECTED</code> signale la connexion, <code>SET_GLUE_SCREEN</code> pilote les ecrans, et le message d'erreur <code>"BattlenetLogin was unable to connect to Sunken"</code> (dans <code>BattlenetLogin.cpp</code> @ <code>0xDC6A38</code>) indique un echec de connexion au serveur de login.</p>
+  <h3>BattlenetLogin : RTTI et connexion a Sunken</h3>
+  <p>Le serveur de login interne s'appelle <b>Sunken</b> — nom de code decouvert par RTTI. Le module <code>BattlenetLogin</code> gere la connexion au protocole Battle.net 2.0 et expose ses propres classes :</p>
+  <table class="tbl">
+    <thead><tr><th>VA</th><th>RTTI / String</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>0xE63828</code></td><td><code>GameAccount@BattlenetLogin</code></td><td>Compte joueur dans le protocole BN</td></tr>
+      <tr><td><code>0xE6385C</code></td><td><code>BN_EVENT@BattlenetLogin</code></td><td>Evenements Battle.net (connect, disconnect, ...)</td></tr>
+      <tr><td><code>0xE63888</code></td><td><code>BN_REALM@BattlenetLogin</code></td><td>Royaume dans le protocole BN</td></tr>
+      <tr><td><code>0xE63A28</code></td><td><code>Sunken@Server@Creep</code></td><td>Serveur de login (nom de code)</td></tr>
+      <tr><td><code>0xE63B78</code></td><td><code>Resolver@Sunken@Server@Creep</code></td><td>Resolution DNS du serveur</td></tr>
+      <tr><td><code>0xE63C58</code></td><td><code>Manager@Sunken@Server@Creep</code></td><td>Gestionnaire de connexion</td></tr>
+    </tbody>
+  </table>
+  <p>L'evenement <code>BN_CONNECTED</code> signale la connexion, <code>SET_GLUE_SCREEN</code> pilote les ecrans, et le message d'erreur <code>"BattlenetLogin was unable to connect to Sunken"</code> (dans <code>BattlenetLogin.cpp</code> @ <code>0xDC6A38</code>) indique un echec de connexion. La deconnexion est geree par <code>CGlueMgr::NetDisconnectHandler</code>. L'API expose aussi <code>BattlenetAPI_DisconnectAllSunkenConnections</code> et <code>BattlenetAPI_GetTimeSinceLogin</code>. Un second message d'erreur, <code>AUTH_LOGIN_SERVER_NOT_FOUND</code> (@ <code>0xDC956C</code>), indique un echec de resolution DNS — le client ne trouve pas le serveur Sunken.</p>
 
   <h3>Table complete des etats</h3>
   <table class="tbl">
@@ -237,7 +307,26 @@ INITIALIZED ──→ CONNECTING ──→ HANDSHAKING <span class="cm">(TLS/SSP
               MATRIX_WAIT → <span class="cm">matrice</span>
               PIN_WAIT → <span class="cm">pin</span>
                        │
+              FIRST_SECURITY
+                       │
               Realm List / Character Select</code></pre>
+
+  <h3>Symboles de debug de session</h3>
+  <p>Le build Debug de la DLL a egalement laisse des symboles de champs de session dans <code>.rdata</code>, donnant les noms internes des membres cles de la structure de session :</p>
+  <table class="tbl">
+    <thead><tr><th>VA</th><th>Symbole</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>0xE0E8A8</code></td><td><code>m_sessionId</code></td><td>Identifiant de session</td></tr>
+      <tr><td><code>0xE0F2F9</code></td><td><code>m_sessionInfo</code></td><td>Information de session</td></tr>
+      <tr><td><code>0xE10299</code></td><td><code>m_sessionList</code></td><td>Liste de sessions actives</td></tr>
+      <tr><td><code>0xE156A5</code></td><td><code>m_accountId</code></td><td>ID de compte</td></tr>
+      <tr><td><code>0xE107CD</code></td><td><code>m_realmId</code></td><td>ID du royaume</td></tr>
+      <tr><td><code>0xE09842</code></td><td><code>m_clientId</code></td><td>ID client</td></tr>
+      <tr><td><code>0xE0D374</code></td><td><code>m_clientSalt</code></td><td>Salt cote client</td></tr>
+      <tr><td><code>0xE17C77</code></td><td><code>m_sessionKey</code></td><td>Cle de session (20 octets SHA1)</td></tr>
+    </tbody>
+  </table>
+  <p>Ces symboles sont des strings dans <code>.rdata</code> — pas des noms de fonction, mais des noms de <i>membre</i> utilises probablement par la serialisation BSN ou par un systeme de reflection. Leur presence confirme la structure interne et donne des ancres supplementaires pour la reconstruction des objets.</p>
 
   <p>Les flags de configuration <code>LOGIN_USE_GRUNT</code> (@ <code>0xDBF828</code>) et <code>AUTH_USE_GRUNT_LOGON</code> (@ <code>0xE28AEC</code>) activent ce module. La presence de 12 etats complets — incluant trois variantes de 2FA (token, matrice, PIN) et un etat de telechargement de patches — montre que le protocole est celui d'un vrai Battle.net, pas d'un emulateur minimal. On note deja, a l'etat <code>HANDSHAKING</code>, la presence de TLS : premier indice que l'auth n'est <i>pas</i> le SRP6 « classique » des cores d'emulation.</p>
 
@@ -269,6 +358,36 @@ INITIALIZED ──→ CONNECTING ──→ HANDSHAKING <span class="cm">(TLS/SSP
     <li>Des messages d'erreur revealateurs du systeme de chiffrement : <code>"The local stalker client failed to use the key from the server to decrypt the game..."</code> (@ <code>0xDC8750</code>) et <code>"The Stalker server didn't give a key to the client to decrypt the game."</code> (@ <code>0xDC87E8</code>).</li>
   </ul>
 
+  <h3>Le protocole SRP6 tel que le statique le decrivait</h3>
+  <p>L'analyse des chaines, RTTI et xrefs reconstitue un echange SRP6 complet, structurellement identique au protocole Blizzard documente dans les cores d'emulation :</p>
+  <pre><code><span class="cm">// protocole SRP6 — reconstruit par statique</span>
+<span class="cm">//</span>
+<span class="cm">// Client                                          Server</span>
+<span class="cm">//   │                                                │</span>
+<span class="cm">//   │  1. Account name + random A value              │</span>
+<span class="cm">//   ├──────────────────────────────────────────────►  │</span>
+<span class="cm">//   │                                                │</span>
+<span class="cm">//   │  2. SMSG_AUTH_CHALLENGE                        │</span>
+<span class="cm">//   │  ◄───────────────────────────────────────────  │</span>
+<span class="cm">//   │  {B=server public, salt(32), g, N, unk}        │</span>
+<span class="cm">//   │                                                │</span>
+<span class="cm">//   │  3. Client computes:</span>
+<span class="cm">//   │    x = SHA1(username | SHA1(user:pass) | salt)</span>
+<span class="cm">//   │    v = g^x mod N  (verifier)</span>
+<span class="cm">//   │    S = (B - 3g^x)^(a + u*x) mod N</span>
+<span class="cm">//   │    SessionKey = SHA1(S) ← 20 bytes</span>
+<span class="cm">//   │    ClientProof = SHA1(A | B | SessionKey)</span>
+<span class="cm">//   │                                                │</span>
+<span class="cm">//   │  4. AUTH_PROOF {A, ClientProof}                │</span>
+<span class="cm">//   ├──────────────────────────────────────────────►  │</span>
+<span class="cm">//   │                                                │</span>
+<span class="cm">//   │  5. AUTH_PROOF_OK                              │</span>
+<span class="cm">//   │  ◄───────────────────────────────────────────  │</span>
+<span class="cm">//   │                                                │</span>
+<span class="cm">//   │  6. REALM_LIST request                         │</span>
+<span class="cm">//   ├──────────────────────────────────────────────►  │</span></code></pre>
+  <p>Les classes RTTI confirment chaque etape : <code>Battlenet::Session::Salt</code> (@ <code>0xE07F5B</code>) pour le salt, <code>Battlenet::Session::Proof</code> (@ <code>0xE22E70</code>) pour le proof, <code>Battlenet::Session::Key</code> (@ <code>0xE22E8A</code>) pour la cle de session. La valeur A (random client) est generee par <code>CryptGenRandom</code> (IAT @ <code>0xEDDC5A</code>).</p>
+
   <h3>Le handler SMSG_AUTH_CHALLENGE</h3>
   <p>Le point central de l'hypothese : la fonction <code>SendAuthChallenge</code> @ <span class="ad">0xE5A85B</span>, entree [13] de la table d'opcodes <code>g_AuthOpcodeTable</code> (@ <code>0xDC3BC0</code>, 24 entrees). Elle construit le proof d'auth ainsi :</p>
   <pre><code><span class="cm">// derivation de cle — hypothese statique</span>
@@ -280,7 +399,8 @@ SendAuthChallenge @ <span class="ad">0xE5A85B</span>
   SHA1_Update(&amp;ctx, &amp;clientToken_ptr, <span class="kw">4</span>);   <span class="cm">// reference de token</span>
   SHA1_Update(&amp;ctx, session-&gt;seed, <span class="kw">40</span>);     <span class="cm">// 40 octets de material (challenge serveur)</span>
   SHA1_Final(&amp;ctx, digest);                 <span class="cm">// → 20 octets = cle de session</span>
-  <span class="cm">// SHA1 MAISON (pas CryptoAPI)</span></code></pre>
+  <span class="cm">// SHA1 MAISON (pas CryptoAPI)</span>
+  <span class="cm">// envoie ensuite le proof + addon sync au serveur</span></code></pre>
 
   <h3>La structure AuthSession reconstruite</h3>
   <p>Par analyse croisee des xrefs et des offsets, j'ai reconstruit la disposition de <code>AuthSession</code> :</p>
@@ -290,20 +410,24 @@ SendAuthChallenge @ <span class="ad">0xE5A85B</span>
     <span class="kw">char</span>     accountName[<span class="kw">1280</span>];       <span class="cm">// +0x004 — copie depuis l'UI</span>
     uint32_t accountId;               <span class="cm">// +0x504</span>
     uint8_t  seed[<span class="kw">40</span>];                <span class="cm">// +0x508 ★ material de cle (challenge serveur)</span>
+                                      <span class="cm">//   popule depuis SMSG_AUTH_CHALLENGE</span>
+                                      <span class="cm">//   hashe par SendAuthChallenge</span>
+                                      <span class="cm">//   efface par AuthSession_Cleanup apres envoi</span>
     <span class="kw">void</span>*    bsnValue;                <span class="cm">// +0x514 — BSN (Battle.net Serialization)</span>
     uint8_t  someFlag;                <span class="cm">// +0x530</span>
     <span class="kw">void</span>*    bsnContainer;            <span class="cm">// +0x534 — conteneur BSN/Types.h</span>
-    CRITICAL_SECTION lock;            <span class="cm">// +0x1334 (approx.)</span>
+    CRITICAL_SECTION lock;            <span class="cm">// +0x1334 (approx.) — utilise par sub_79ABE7</span>
     uint32_t connectionState;         <span class="cm">// +0x1356</span>
-    uint8_t  cleanupFlags[<span class="kw">3</span>];        <span class="cm">// +0x4557</span>
-    uint8_t  cleanupFlags2[<span class="kw">3</span>];       <span class="cm">// +0x4613</span>
+    uint8_t  cleanupFlags[<span class="kw">3</span>];        <span class="cm">// +0x4557 — effaces par sub_A5AF37</span>
+    uint8_t  cleanupFlags2[<span class="kw">3</span>];       <span class="cm">// +0x4613 — effaces par sub_A5B774</span>
     <span class="kw">void</span>*    socket;                  <span class="cm">// +0x4730 — couche reseau</span>
     uint8_t  connected;               <span class="cm">// +0x4740 — flag pose apres le challenge</span>
-    uint32_t field_a;                 <span class="cm">// +0x4764 — composante seed a</span>
+    uint32_t field_a;                 <span class="cm">// +0x4764 — composante seed a (depuis les donnees du paquet)</span>
     uint32_t field_b;                 <span class="cm">// +0x4768 — composante seed b</span>
     uint32_t field_c;                 <span class="cm">// +0x476C — composante seed c</span>
 };</code></pre>
-  <p>Detail important : <code>AuthSession_Cleanup</code> (@ <code>0xA61511</code>) efface <code>seed[40]</code> et <code>accountName</code> apres l'envoi du proof — securite de base, mais qui signifie qu'un outil de capture doit lire le seed <i>pendant</i> le handshake, pas apres. La serialisation BSN (<code>BSN_Array_Clear</code> @ <code>0xA5FA9A</code>, <code>BSN_Value_Reset</code> @ <code>0x8EACDA</code>, reference <code>BSN/Types.h</code> ligne 295) est la couche de serialisation Battle.net utilisee pour encoder les messages.</p>
+  <p>Detail important : <code>AuthSession_Cleanup</code> (@ <code>0xA61511</code>) efface <code>seed[40]</code> et <code>accountName</code> apres l'envoi du proof — securite de base, mais qui signifie qu'un outil de capture doit lire le seed <i>pendant</i> le handshake, pas apres. La function appelle <code>BSN_Array_Clear</code> (@ <code>0xA5FA9A</code>) qui efface l'en-tete du conteneur BSN (les 3 premiers champs : <code>this</code>, <code>this+1</code>, <code>this+2</code>), puis <code>BSN_Value_Reset</code> (@ <code>0x8EACDA</code>) pour chaque valeur individuelle. La reference <code>BSN/Types.h</code> ligne 295 dans le binaire confirme que BSN est la couche de serialisation Battle.net interne.</p>
+  <p>Apres l'auth, le traitement de la liste de comptes est gere par <code>AccountList_Process</code> (@ <code>0xA60651</code>), qui itere sur des entrees de 20 octets chacune, appelant <code>AccountEntry_CheckFlag</code> (@ <code>0xA5F7E5</code>) par entree — cette derniere verifie/efface un flag a l'offset <code>entry+0x1C</code> et renvoie <code>-1</code> en cas d'etat invalide.</p>
 
   <h3>Le PRNG : OsSecureRandom et ScrambleSeed</h3>
   <p>Deux generateurs de nombres aleatoires participent a l'auth :</p>
@@ -316,11 +440,12 @@ SendAuthChallenge @ <span class="ad">0xE5A85B</span>
   <h3>La table de dispatch auth</h3>
   <p>Les opcodes d'auth sont consommes par <code>AuthOpcode_Dispatch</code> (@ <code>0xA5BB71</code>) via la table <code>g_AuthOpcodeTable</code> @ <code>0xDC3BC0</code> :</p>
   <table class="tbl">
-    <thead><tr><th>Index</th><th>Handler</th><th>Role</th></tr></thead>
+    <thead><tr><th>Index</th><th>VA</th><th>Handler</th><th>Role</th></tr></thead>
     <tbody>
-      <tr><td>[13]</td><td><code>SendAuthChallenge</code> @ <code>0xE5A85B</code></td><td>Construit et envoie le proof</td></tr>
-      <tr><td>[14]</td><td><code>Handle_AuthResponse</code> @ <code>0xA5A823</code></td><td>SUCCESS/FAIL/BANNED → realm list si OK</td></tr>
-      <tr><td>[15]</td><td><code>Handle_AuthNext</code> @ <code>0xA5A85A</code></td><td>Etat suivant</td></tr>
+      <tr><td>[13]</td><td><code>0xE5A85B</code></td><td><code>SendAuthChallenge</code></td><td>Construit et envoie le proof</td></tr>
+      <tr><td>[14]</td><td><code>0xA5A823</code></td><td><code>Handle_AuthResponse</code></td><td>SUCCESS/FAIL/BANNED → realm list si OK</td></tr>
+      <tr><td>[15]</td><td><code>0xA5A85A</code></td><td><code>Handle_AuthNext</code></td><td>Etat suivant</td></tr>
+      <tr><td>[16]</td><td><code>0xA5A88E</code></td><td><code>Handle_AuthFinal</code></td><td>Etat final d'auth</td></tr>
     </tbody>
   </table>
   <p>Le plan etait evident a ce stade : <b>hooker le SHA1 ou la CryptoAPI</b> pour capturer la cle au vol, puis dechiffrer tout le trafic du monde. La cle finit dans un objet <code>Battlenet::WoW::SessionKey</code> (RTTI @ <code>0xE18A6F</code>, membre <code>m_sessionKey</code> @ <code>0xE17C77</code>, classe de base <code>Battlenet::Session::Key</code> @ <code>0xE22E8A</code>), qui la hashe ensuite pour une URL : <code>%s?accountName=%s&sessionKeyHash=</code> (@ <code>0xDA76A0</code>) — envoyee au realm server.</p>
@@ -350,53 +475,53 @@ SendAuthChallenge @ <span class="ad">0xE5A85B</span>
 SSPI_Init @ <span class="ad">0xBA0CF1</span>
   LoadLibraryW(<span class="st">"secur32.dll"</span>)
   GetProcAddress(h, <span class="st">"InitSecurityInterfaceW"</span>)
-  → SecurityFunctionTableW stockee a <span class="ad">dword_12F6E10</span></code></pre>
-  <p>La table de fonctions de securite est stockee globalement, avec un flag d'initialisation a <code>dword_12F6E20</code> verifie par <code>Schannel_EnsureInit</code> (@ <code>0xBA19F2</code>) qui appelle <code>SSPI_Init</code> si necessaire. Les fonctions critiques sont indexees dans la table :</p>
+  → SecurityFunctionTableW stockee a <span class="ad">dword_12F6E10</span>
+
+<span class="cm">// flag d'initialisation : dword_12F6E20</span>
+<span class="cm">// verifie par Schannel_EnsureInit avant chaque operation</span></code></pre>
+  <p>La table de fonctions de securite est stockee globalement a <code>dword_12F6E10</code>, avec un flag d'initialisation a <code>dword_12F6E20</code> verifie par <code>Schannel_EnsureInit</code> (@ <code>0xBA19F2</code>) qui appelle <code>SSPI_Init</code> si necessaire. Les fonctions critiques sont indexees dans la table :</p>
   <table class="tbl">
-    <thead><tr><th>Index</th><th>Offset</th><th>Fonction SSPI</th></tr></thead>
+    <thead><tr><th>Index</th><th>Offset</th><th>Fonction SSPI</th><th>Role</th></tr></thead>
     <tbody>
-      <tr><td>[3]</td><td>+12</td><td><code>AcquireCredentialsHandleW</code></td></tr>
-      <tr><td>[6]</td><td>+24</td><td><code>InitializeSecurityContextW</code></td></tr>
-      <tr><td>[16]</td><td>+64</td><td><code>FreeContextBuffer</code></td></tr>
-      <tr><td>[25]</td><td>+100</td><td><code>EncryptMessage</code></td></tr>
-      <tr><td>[26]</td><td>+104</td><td><code>DecryptMessage</code></td></tr>
+      <tr><td>[3]</td><td>+12</td><td><code>AcquireCredentialsHandleW</code></td><td>Obtenir les credentials TLS</td></tr>
+      <tr><td>[6]</td><td>+24</td><td><code>InitializeSecurityContextW</code></td><td>Handshake TLS (multi-step)</td></tr>
+      <tr><td>[16]</td><td>+64</td><td><code>FreeContextBuffer</code></td><td>Liberer les buffers temporaires</td></tr>
+      <tr><td>[25]</td><td>+100 (<code>0x64</code>)</td><td><code>EncryptMessage</code></td><td>Chiffrer les donnees sortantes</td></tr>
+      <tr><td>[26]</td><td>+104 (<code>0x68</code>)</td><td><code>DecryptMessage</code></td><td>Dechiffrer les donnees entrantes</td></tr>
     </tbody>
   </table>
 
   <h3>Le handshake TLS</h3>
   <p>Le flux complet, reconstruit par trace des fonctions et verification des retours SSPI :</p>
-  <pre><code><span class="cm">// flux TLS complet</span>
-Schannel_EnsureInit() @ <span class="ad">0xBA19F2</span>
-  → SSPI_Init() @ <span class="ad">0xBA0CF1</span>
-    → LoadLibraryW(<span class="st">"secur32.dll"</span>)
-    → InitSecurityInterfaceW() → table a <span class="ad">dword_12F6E10</span>
-
-Schannel_Connect_Step1() @ <span class="ad">0xBB3573</span>
-  → AcquireCredentialsHandleW(<span class="st">"Microsoft Unified Security Protocol Provider"</span>)
-  → InitializeSecurityContextW(initial) → <span class="kw">SEC_I_CONTINUE_NEEDED</span>
-  → envoie les donnees de handshake au serveur
-
-Schannel_Handshake_Continue() @ <span class="ad">0xBB3644</span>
-  → recoit la reponse serveur
-  → InitializeSecurityContextW(next)
-    → <span class="kw">SEC_I_CONTINUE_NEEDED</span> : envoie plus de donnees, boucle
-    → <span class="kw">SEC_E_OK</span> : <span class="st">"SSL/TLS handshake complete"</span>
-  → apres le handshake : <span class="kw">TOUT</span> le login passe par EncryptMessage/DecryptMessage</code></pre>
-
-  <p>Le hostname est converti d'ASCII vers wide char par <code>UTF8_To_WideChar</code> (@ <code>0xBC4F15</code>) pour l'appel SSPI. Les erreurs SSPI sont mappees vers des strings lisibles par <code>Schannel_MapError</code> (@ <code>0xBB2A88</code>). Le support SOCKS5 avec authentification GSSAPI/Kerberos est present (@ <code>0xBC6AD8</code>) — indiquant que le client gere aussi les proxys d'entreprise.</p>
+  <div class="steps">
+    <div class="step"><b>Schannel_EnsureInit</b> (@ <span class="ad">0xBA19F2</span>) — verifie <code>dword_12F6E20</code> ; si pas initialise, appelle <code>SSPI_Init</code> (@ <span class="ad">0xBA0CF1</span>) qui charge <code>secur32.dll</code> via <code>LoadLibraryW</code>, appelle <code>InitSecurityInterfaceW</code>, et stocke la <code>SecurityFunctionTableW</code> a <code>dword_12F6E10</code>.</div>
+    <div class="step"><b>Schannel_Connect_Step1</b> (@ <span class="ad">0xBB3573</span>) — appelle <code>AcquireCredentialsHandleW</code> avec le provider <code>"Microsoft Unified Security Protocol Provider"</code>, puis <code>InitializeSecurityContextW(initial)</code> qui renvoie <code>SEC_I_CONTINUE_NEEDED</code>. Le hostname est converti d'ASCII vers wide char par <code>UTF8_To_WideChar</code> (@ <span class="ad">0xBC4F15</span>). Envoie les donnees de handshake initiales au serveur.</div>
+    <div class="step"><b>Schannel_Handshake_Continue</b> (@ <span class="ad">0xBB3644</span>) — recoit la reponse du serveur, appelle <code>InitializeSecurityContextW(next)</code> en boucle : <code>SEC_I_CONTINUE_NEEDED</code> → envoie plus de donnees ; <code>SEC_E_OK</code> → <b>"SSL/TLS handshake complete"</b>. Les erreurs sont mappees vers des strings lisibles par <code>Schannel_MapError</code> (@ <span class="ad">0xBB2A88</span>).</div>
+    <div class="step">Apres le handshake : <b>tout</b> le login passe par <code>EncryptMessage</code>/<code>DecryptMessage</code> — les opcodes SRP6 sont encapsules dans le tunnel TLS.</div>
+  </div>
+  <p>Le support SOCKS5 avec authentification GSSAPI/Kerberos est present (@ <code>0xBC6AD8</code>) — indiquant que le client gere aussi les proxys d'entreprise.</p>
 
   <h3>Ou vit la cle de session TLS</h3>
   <p>La cle de session ne vit donc pas dans un <code>seed[40]</code> : elle est <b>a l'interieur du contexte de securite SSPI</b> (le <code>CtxtHandle</code> stocke par connexion, a l'offset <code>a1 + 72*a2 + 344 + 12</code>). Sur son propre process, on la lit proprement :</p>
   <pre><code><span class="cm">// ou vit vraiment la cle — lecture depuis SON PROPRE process</span>
-QueryContextAttributesW(&amp;hCtxt, SECPKG_ATTR_SESSION_KEY, &amp;sessionKey);
+<span class="cm">// Option A : API standard</span>
+QueryContextAttributesW(&amp;hCtxt, <span class="kw">SECPKG_ATTR_SESSION_KEY</span>, &amp;sessionKey);
 
-<span class="cm">// alternative : hooker DecryptMessage dans la table SSPI</span>
+<span class="cm">// Option B : hooker DecryptMessage dans la table SSPI</span>
+<span class="cm">// dword_12F6E10 est la SecurityFunctionTableW</span>
+<span class="cm">// DecryptMessage est a l'offset 0x68 (index [26])</span>
 <span class="kw">void</span>* origDecrypt = *(<span class="kw">void</span>**)(<span class="ad">dword_12F6E10</span> + <span class="kw">0x68</span>);
-*(<span class="kw">void</span>**)(<span class="ad">dword_12F6E10</span> + <span class="kw">0x68</span>) = MyDecryptHook;</code></pre>
+*(<span class="kw">void</span>**)(<span class="ad">dword_12F6E10</span> + <span class="kw">0x68</span>) = MyDecryptHook;
+<span class="cm">// ce hook voit tout le trafic de login dechiffre</span>
+
+<span class="cm">// Option C : lecture directe du contexte SSPI en memoire</span>
+<span class="cm">// trouver la structure de connexion active</span>
+<span class="cm">// le CtxtHandle est a a1 + 72*idx + 344</span>
+<span class="cm">// la cle est a offset +12 dans le CtxtHandle</span></code></pre>
 
   <div class="note warn">
     <span class="lbl">L'enseignement</span>
-    L'hypothese statique etait <b>coherente et fausse</b>. Les artefacts SRP6/SHA1 existent dans le binaire — code herite, chemins morts, ou auth d'un autre canal (probablement le canal ComSat/voix) — mais le <b>login reel</b> avait migre vers TLS. C'est exactement la valeur de la boucle dynamique : un hook <i>qui ne se declenche pas</i> est une donnee, pas un echec. Ici, le silence des hooks a reecrit toute la carte. Le double echec (Wine qui bypass l'IAT + SHA1 qui n'est pas utilise pour l'auth) a converge vers la bonne reponse : la resolution dynamique des fonctions SSPI, invisible a l'analyse d'import classique.
+    L'hypothese statique etait <b>coherente et fausse</b>. Les artefacts SRP6/SHA1 existent dans le binaire — code herite, chemins morts, ou auth d'un autre canal (probablement le canal ComSat/voix, dont le secret partage <code>Battlenet::Client::ComSat::Secret</code> @ <code>0xE09CE5</code> est present dans le binaire) — mais le <b>login reel</b> avait migre vers TLS. C'est exactement la valeur de la boucle dynamique : un hook <i>qui ne se declenche pas</i> est une donnee, pas un echec. Ici, le silence des hooks a reecrit toute la carte. Le double echec (Wine qui bypass l'IAT + SHA1 qui n'est pas utilise pour l'auth) a converge vers la bonne reponse : la resolution dynamique des fonctions SSPI, invisible a l'analyse d'import classique.
   </div>
 
   <!-- ════════════════════════════════════════════════════════════════════ -->
@@ -421,6 +546,18 @@ bits   : MSB-first</code></pre>
       <tr><td><code>CMSG</code></td><td>Client → serveur</td><td>Avant chiffrement</td><td>base <code>CDataStore</code> ; opcode LE en tete</td></tr>
     </tbody>
   </table>
+
+  <h3>Wrappers CryptoAPI : le chemin reel du hash</h3>
+  <p>En tracant les appelants de l'IAT CryptoAPI, j'ai identifie deux wrappers internes — utiles pour comprendre comment la cle de session est extraite apres le hash :</p>
+  <table class="tbl">
+    <thead><tr><th>VA</th><th>Wrapper</th><th>Comportement</th></tr></thead>
+    <tbody>
+      <tr><td><code>0xFC5906</code></td><td><code>CryptHashData_Wrapper</code></td><td>Thin wrapper : <code>CryptHashData(ctx->hash, data, len, 0)</code> — appelle directement la CryptoAPI via l'IAT</td></tr>
+      <tr><td><code>0xFC591F</code></td><td><code>CryptGetHashParam_Cleanup</code></td><td>Sequence complete : <code>GetHashParam</code> → obtenir la taille → obtenir les donnees → <code>DestroyHash</code> → <code>ReleaseContext</code>. Gestion du cycle de vie du hash en une seule fonction</td></tr>
+    </tbody>
+  </table>
+  <p>Ces wrappers encapsulent la CryptoAPI pour le trafic monde — pas pour l'auth. Tracer leurs appelants confirme qu'ils ne sont appeles qu'apres l'etablissement de la WorldSession, pendant le chiffrement RC4 des paquets du monde.</p>
+
   <p>La table de dispatch d'auth (24 entrees @ <code>0xDC3BC0</code>) sert de modele mental : le monde a sa propre logique de routage des opcodes, qu'on retrouve par les memes techniques (xref sur les chaines d'opcode, remontee des appelants). L'opcode <code>SMSG_AUTH_RESPONSE</code> (string @ <code>0xDC3C20</code>) est traite par <code>Handle_AuthResponse</code> (@ <code>0xA5A823</code>) qui gere SUCCESS/FAIL/BANNED et, en cas de succes, enchaine vers la realm list.</p>
 
   <!-- ════════════════════════════════════════════════════════════════════ -->
@@ -444,6 +581,7 @@ CryptImportKey_SetPadding @ <span class="ad">0x9D3424</span>
       <tr><td><code>0xEDDC80</code></td><td><code>CryptCreateHash</code></td><td>Cree un hash SHA1 (CALG_SHA1=0x8004)</td></tr>
       <tr><td><code>0xEDDC92</code></td><td><code>CryptHashData</code></td><td>Alimente le SHA1</td></tr>
       <tr><td><code>0xEDDCB6</code></td><td><code>CryptGetHashParam</code></td><td>Extrait le resultat 20 octets</td></tr>
+      <tr><td><code>0xEDDB5A</code></td><td><code>CryptGenKey</code></td><td>Generation de cle crypto</td></tr>
       <tr><td><code>0xEDDB7A</code></td><td><code>CryptImportKey</code></td><td>Importe la cle de session comme cle RC4</td></tr>
       <tr><td><code>0xEDDB8C</code></td><td><code>CryptEncrypt</code></td><td>Chiffre/dechiffre chaque paquet (RC4 sym.)</td></tr>
       <tr><td><code>0xEDDC5A</code></td><td><code>CryptGenRandom</code></td><td>Generation aleatoire (valeur A du SRP6)</td></tr>
@@ -453,10 +591,10 @@ CryptImportKey_SetPadding @ <span class="ad">0x9D3424</span>
   <h3>Approches de capture evaluees</h3>
   <p>Le crypto-hook-guide documente quatre approches, du plus simple au plus complet :</p>
   <div class="steps">
-    <div class="step"><b>Hook CryptImportKey</b> (le plus simple) — un seul point de hook, capture le key blob (20 octets) directement, appele une seule fois par session.</div>
-    <div class="step"><b>Hook CryptGetHashParam</b> (le plus precis) — capture la sortie SHA1 exacte, permet de verifier le contexte d'appel pour confirmer que c'est bien le SRP6.</div>
-    <div class="step"><b>Lecture memoire directe</b> (le plus discret) — trouve l'objet <code>Battlenet::WoW::SessionKey</code> en memoire (RTTI @ <code>0xE18A6F</code>, cle a <code>this+4</code> ou <code>this+8</code> apres vtable), lit 20 octets — aucun hook, juste une lecture process.</div>
-    <div class="step"><b>Hook CryptEncrypt</b> (la plus grande visibilite) — voit chaque paquet chiffre/dechiffre en clair, mais plus complexe (gestion des deux directions).</div>
+    <div class="step"><b>Hook CryptImportKey</b> (le plus simple) — un seul point de hook, capture le key blob (20 octets) directement, appele une seule fois par session. Site : IAT @ <code>0xEDDB7A</code>.</div>
+    <div class="step"><b>Hook CryptGetHashParam</b> (le plus precis) — capture la sortie SHA1 exacte, permet de verifier le contexte d'appel pour confirmer que c'est bien le derivation de cle de session. Site : IAT @ <code>0xEDDCB6</code>, wrapper interne @ <code>0xFC591F</code>.</div>
+    <div class="step"><b>Lecture memoire directe</b> (le plus discret) — trouve l'objet <code>Battlenet::WoW::SessionKey</code> en memoire (RTTI @ <code>0xE18A6F</code>, cle a <code>this+4</code> ou <code>this+8</code> apres vtable), lit 20 octets — aucun hook, juste une lecture process via <code>/proc/[pid]/mem</code>.</div>
+    <div class="step"><b>Hook CryptEncrypt</b> (la plus grande visibilite) — voit chaque paquet chiffre/dechiffre en clair, mais plus complexe (gestion des deux directions, volume eleve). Site : IAT @ <code>0xEDDB8C</code>.</div>
   </div>
   <p>J'ai choisi l'approche 3 — <b>lecture memoire directe</b>, la plus propre et la moins intrusive. Le contexte RC4 (S-box de 256 octets + indices <code>i</code>/<code>j</code>) vit dans le process ; il suffit de le localiser et de le lire via <code>/proc/[pid]/mem</code> :</p>
   <pre><code><span class="cm"># etat RC4 lu dans la memoire du process — sans hook</span>
@@ -466,11 +604,11 @@ PacketPipe @ <span class="ad">0x0f1771f8</span>
 <span class="cm"># S-box 256 o + indices i,j → RC4 reproductible cote outil d'analyse</span></code></pre>
   <p>La WorldSession est creee <i>apres</i> le succes de l'auth, lors de la selection du realm. Elle contient le handle de la cle RC4 (obtenu via <code>CryptImportKey</code>) et stocke <code>m_sessionKey</code> (20 octets SHA1). Le cycle de vie complet :</p>
   <div class="steps">
-    <div class="step">Auth SRP6 reussie apres <code>SMSG_AUTH_CHALLENGE</code> → SHA1(S) = cle 20 octets.</div>
-    <div class="step">Cle stockee dans l'objet <code>Battlenet::WoW::SessionKey</code> via <code>m_sessionKey</code>.</div>
+    <div class="step">Auth reussie apres <code>SMSG_AUTH_CHALLENGE</code> → SHA1(S) = cle 20 octets.</div>
+    <div class="step">Cle stockee dans l'objet <code>Battlenet::WoW::SessionKey</code> via <code>m_sessionKey</code> (@ <code>0xE17C77</code>).</div>
     <div class="step">Hashee pour un parametre URL : <code>%s?accountName=%s&sessionKeyHash=</code> (@ <code>0xDA76A0</code>) envoyee au realm server.</div>
     <div class="step">Importee comme cle RC4 via <code>CryptImportKey</code> (@ <code>0x9D3424</code>).</div>
-    <div class="step">Utilisee pour tout le chiffrement des paquets du monde via <code>CryptEncrypt</code>.</div>
+    <div class="step">Utilisee pour tout le chiffrement des paquets du monde via <code>CryptEncrypt</code> — un seul appel pour les deux sens, car RC4 est symetrique (<code>CryptDecrypt</code> n'est meme pas dans l'IAT).</div>
   </div>
 
   <h3>Decodage de l'en-tete monde</h3>
@@ -504,14 +642,20 @@ paquet      = [opcode u32][payload]</code></pre>
   <h3>Surface client-side relevee</h3>
   <p>Ce parser s'inscrit dans une surface cote client plus large, relevee sur ma propre installation lors du meme audit — utile pour situer le bug memoire dans son contexte :</p>
   <table class="tbl">
-    <thead><tr><th>Constat (client perso)</th><th>Nature</th></tr></thead>
+    <thead><tr><th>Constat (client perso)</th><th>Nature</th><th>Severite</th></tr></thead>
     <tbody>
-      <tr><td>Build <b>Debug</b> livre aux joueurs (<code>0xCC</code>/<code>int3</code>, heap CRT debug, chemin PDB <code>D:\work\Pandaria\...</code>)</td><td>Fuite d'info interne, surface d'assertions</td></tr>
-      <tr><td>Aucun anti-tamper effectif : <code>IsDebuggerPresent</code> importe mais inutilise, pas de Warden, pas de verification d'integrite runtime, pas de verification de signature de code au runtime</td><td>Integrite runtime nulle</td></tr>
-      <tr><td>Fonction Lua sensible exposee : <code>C_Hardcore.DiedPermanently(1)</code> (@ <code>0x10011455</code>) — publiquement callable depuis n'importe quel addon, renvoie <code>true</code></td><td>Callable depuis un addon ; gardee par le mode hardcore (le perso n'est pas hardcore), mais si <code>SetHardcoreRulesAccepted</code> (@ <code>0x100057EA</code>) devenait expose a Lua, destruction de personnage possible</td></tr>
-      <tr><td><code>C_PandaWoWAPI.ChangeEnables(x)</code> corrompt le rendu pour toute valeur testee (0-5, 10, 50, 99, 100, 255, -1) — renvoie <code>true</code></td><td>DoS client-side (local)</td></tr>
-      <tr><td>Patches CDN sur <code>http://cdn.pandawow.me:90/patch_dev.php</code> (HTTP sans TLS, port 90)</td><td>MITM de patch possible (constat de config)</td></tr>
-      <tr><td>Typo dans le code : <code>IsHardcodeModeEnabled</code> au lieu de <code>IsHardcoreModeEnabled</code></td><td>Indicateur de qualite du code</td></tr>
+      <tr><td>Build <b>Debug</b> livre aux joueurs (<code>0xCC</code>/<code>int3</code>, heap CRT debug, chemin PDB <code>D:\work\Pandaria\...</code>)</td><td>Fuite d'info interne, surface d'assertions</td><td>CRITIQUE</td></tr>
+      <tr><td><code>C_Hardcore.DiedPermanently(1)</code> (@ <code>0x10011455</code>) — publiquement callable depuis n'importe quel addon, renvoie <code>true</code></td><td>Fonction Lua sensible exposee. Gardee par le mode hardcore (perso non-HC), mais si <code>SetHardcoreRulesAccepted</code> (@ <code>0x100057EA</code>) devenait expose a Lua → destruction de personnage</td><td>CRITIQUE</td></tr>
+      <tr><td>Aucun anti-tamper effectif : <code>IsDebuggerPresent</code> importe mais inutilise, pas de Warden, pas de verification d'integrite runtime, pas de verification de signature de code. <b>15+ DLLs custom injectees, 6+ fonctions hookees</b></td><td>Integrite runtime nulle</td><td>HAUTE</td></tr>
+      <tr><td>Interception et modification de tous les messages de chat : resultats de duel alterables, messages fabricables, impersonation locale de n'importe quel joueur</td><td>Chat spoofing client-side</td><td>HAUTE</td></tr>
+      <tr><td>DLL injectee peut ecrire des fichiers Lua dans <code>Interface/AddOns/</code> — auto-execute au prochain demarrage, survit a une reinstallation si <code>WTF/</code> est conserve</td><td>Injection persistante d'addon</td><td>HAUTE</td></tr>
+      <tr><td><code>C_PandaWoWAPI.ChangeEnables(x)</code> corrompt le rendu pour toute valeur testee (0-5, 10, 50, 99, 100, 255, -1) — renvoie <code>true</code></td><td>DoS client-side (local)</td><td>HAUTE</td></tr>
+      <tr><td>Patches CDN sur <code>http://cdn.pandawow.me:90/patch_dev.php</code> (HTTP sans TLS, port 90)</td><td>MITM de patch possible (constat de config)</td><td>MOYENNE</td></tr>
+      <tr><td>Login credentials saisissables programmatiquement via <code>SendInput</code> (WM_KEYDOWN/WM_CHAR), entree du monde automatisable, tout commande chat injectable par simulation clavier</td><td>Automatisation sans garde</td><td>MOYENNE</td></tr>
+      <tr><td>Fonctions de debug exposees a Lua : <code>C_PandaWoWAPI.FlashClientIcon()</code>, <code>TreatScenarioAsDungeon()</code>, <code>TaxiRequestEarlyLanding()</code> (bypass de trajet de vol), <code>C_Transmog.ApplyAllPending()</code> (transmog a 0 gold sur ce serveur)</td><td>Debug functions en production</td><td>MOYENNE</td></tr>
+      <tr><td>EXE a base fixe <code>0x00400000</code>, <code>AddMessage</code> toujours a <code>0x00475190</code> — meme adresse a chaque session</td><td>Pas d'ASLR, adresses codees en dur</td><td>BASSE</td></tr>
+      <tr><td>Nom de compte en clair dans <code>WTF/Config.wtf</code> (<code>accountName "aze000"</code>) et donnees d'addon dans <code>WTF/Account/AZE000/</code></td><td>Identifiant en clair sur disque</td><td>BASSE</td></tr>
+      <tr><td>Typo dans le code : <code>IsHardcodeModeEnabled</code> au lieu de <code>IsHardcoreModeEnabled</code></td><td>Indicateur de qualite du code</td><td>BASSE</td></tr>
     </tbody>
   </table>
   <p class="small">Tous ces constats sont issus de l'observation de <b>mon propre client / mon propre compte</b>, en local. Rien n'a ete teste contre la production ni contre les donnees d'autres joueurs.</p>
@@ -539,12 +683,12 @@ paquet      = [opcode u32][payload]</code></pre>
   <ul>
     <li><b>RE natif</b> : reconstruire structures (<code>AuthSession</code> a 18+ champs, <code>CDataStore</code>), machines a etats (12 etats Grunt), tables de dispatch (24 opcodes d'auth) et cryptographie (SHA1 maison + CryptoAPI) dans un gros binaire non documente, en s'appuyant sur chaines, RTTI et chemins de source.</li>
     <li><b>Boucle statique/dynamique</b> : oser l'hypothese dans IDA, puis la confronter a la memoire vivante — et traiter une refutation (les hooks muets → « c'est du TLS via SSPI/Schannel ») comme le resultat le plus precieux. Le parcours SRP6 → silence des hooks → decouverte SSPI est un cas d'ecole de revision d'hypothese en RE.</li>
-    <li><b>Analyse de DLL injectee</b> : cartographier un PE32 inconnu de 3,1 Mo, identifier ses sections non-standard (<code>.detourc</code>/<code>.detourd</code>), reconstituer son moteur de hook, inventorier les sous-systemes injectes (Lua API, hardcore, transmog, premium, spectateur, Discord, auto-login, CDN), et comprendre ses interactions avec l'EXE hote.</li>
+    <li><b>Analyse de DLL injectee</b> : cartographier un PE32 inconnu de 3,1 Mo, identifier ses sections non-standard (<code>.detourc</code>/<code>.detourd</code>), reconstituer son moteur de hook, inventorier les sous-systemes injectes (Lua API, hardcore, transmog, premium, spectateur, ToyBox/Heirlooms, Discord, auto-login, CDN, GameUI), et comprendre ses interactions avec l'EXE hote — y compris les classes de bootstrap (<code>DllCliInitial</code>, <code>ClientSetupFeatures</code>) et les 8+ DBC databases chargees a l'init.</li>
     <li><b>Instrumentation a l'octet pres</b> : detours inline, trampolines, longueur-desassemblage, lecture de memoire process — et la comprehension de <i>pourquoi</i> l'adresse exacte du hook fait la difference entre observation et crash.</li>
     <li><b>Securite memoire</b> : identifier une lecture hors-bornes declenchable par une entree non fiable, la caracteriser au niveau crash, et en tirer la mitigation (borner toute longueur reseau).</li>
+    <li><b>Audit de surface client</b> : evaluee systematiquement avec severite (CRITIQUE/HAUTE/MOYENNE/BASSE) — build debug en production, Lua API non gardees (<code>DiedPermanently</code>, <code>ChangeEnables</code>, fonctions de debug), absence d'anti-tamper, injection persistante d'addon, chat spoofing, CDN sans TLS, <code>SendInput</code> automation — documentes avec le niveau de detail necessaire a un rapport de vulnerabilite professionnel.</li>
     <li><b>Appsec web</b> : derouler une chaine d'attaque realiste (XSS de sous-domaine → vol de cookie → session) et proposer un durcissement concret — en restant du cote defensif et responsable.</li>
     <li><b>Lecture d'un environnement adverse</b> : sous Wine, comprendre pourquoi l'IAT se contourne et ou passent reellement les appels — la meme finesse que pour un malware qui resout ses API dynamiquement via <code>LoadLibrary</code>/<code>GetProcAddress</code>. La resolution dynamique de <code>secur32.dll</code> par SSPI_Init est structurellement identique a un loader de malware qui resout ses imports a la volee.</li>
-    <li><b>Surface d'attaque client-side</b> : evaluer l'exposition d'un client — build debug en production, Lua API non gardees, absence d'anti-tamper, CDN sans TLS — et documenter les risques avec le niveau de detail necessaire a un audit professionnel.</li>
   </ul>
 </article>
 

