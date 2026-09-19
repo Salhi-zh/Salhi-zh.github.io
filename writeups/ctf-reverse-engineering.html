@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CTF &amp; Reverse Engineering : ret2win, deux crackmes maison, et une plateforme CTF · Mohamed Salhi</title>
-<meta name="description" content="Reverse engineering de bout en bout : un stack buffer overflow ret2win (PE32 x86, Root-Me ch72), deux crackmes que j'ai concu puis reverse (un license checker UPX a hash Feistel maison + anti-debug TracerPid, un crackme XOR a anti-debug ptrace), et le backend FastAPI d'une plateforme CTF (Hexgate) threat-modelisee.">
+<title>CTF &amp; Reverse Engineering : ret2win, crackmes maison, lab anti-analyse, et une plateforme CTF · Mohamed Salhi</title>
+<meta name="description" content="Reverse engineering de bout en bout : un stack buffer overflow ret2win (PE32 x86, Root-Me ch72), des crackmes concus puis reverses (license checker UPX a hash Feistel, anti-debug ptrace), un laboratoire anti-analyse expert (TracerPid en cascade, VM bytecode, seccomp, debug registers, vDSO timing), et le backend FastAPI d'une plateforme CTF (Hexgate) threat-modelisee.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=IBM+Plex+Sans:wght@300;400;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -22,14 +22,14 @@
 
 <article class="wrap">
   <div class="kicker">CTF · Reverse engineering</div>
-  <h1 class="title">CTF &amp; RE : ret2win, deux crackmes maison, et une plateforme CTF</h1>
+  <h1 class="title">CTF &amp; RE : ret2win, crackmes maison, lab anti-analyse &amp; plateforme CTF</h1>
   <div class="meta">
     <span class="m date">2026</span>
     <span class="m">Root-Me · PE32 / ELF64</span>
     <span class="m">IDA · Ghidra · gdb+pwndbg</span>
     <span class="m">UPX · pwntools · FastAPI</span>
   </div>
-  <p class="lead">Quatre angles de reverse et d'outillage : une <em>exploitation binaire</em> propre (ret2win) sur Root-Me, puis deux crackmes que je <em>concois puis casse</em> — un license checker packe UPX a quatre couches de defense (hash Feistel maison, anti-debug TracerPid, obfuscation XOR, branche leurre), un crackme XOR mono-octet a anti-debug <code>ptrace</code> — et enfin le <em>backend d'une plateforme CTF</em> que j'ai bati et threat-modelise. Concevoir les defis et les resoudre.</p>
+  <p class="lead">Cinq angles de reverse et d'outillage : une <em>exploitation binaire</em> propre (ret2win) sur Root-Me, puis des crackmes que je <em>concois puis casse</em> — un license checker packe UPX a quatre couches de defense, un crackme XOR mono-octet a anti-debug <code>ptrace</code>, un <em>laboratoire anti-analyse</em> ou chaque detection est reactive (corruption de cle, pas simple exit) — et enfin le <em>backend d'une plateforme CTF</em> que j'ai bati et threat-modelise. Concevoir les defis et les resoudre.</p>
 
   <div class="note">
     <span class="lbl">Cadre &amp; honnetete</span>
@@ -543,6 +543,44 @@ echo <span class="st">'flag{wrong_flag_value}'</span> | ./crackme-v2     <span c
   <p>Le gradient de difficulte est delibere : le #2 sert d'entree de gamme, le #1 monte la marche avec quatre couches empilees. Concevoir les deux a permis de calibrer la difficulte perceptive — ce qui bloque un debutant vs. ce qui bloque un intermediaire.</p>
 
   <!-- ================================================================ -->
+  <!-- SECTION 03b — Anti-analysis lab                                  -->
+  <!-- ================================================================ -->
+  <h2><span class="n">03b</span> Laboratoire anti-analyse — crackmes experts concus et resolus</h2><div class="rule"></div>
+
+  <p>Au-dela des deux crackmes detailles ci-dessus, j'ai construit et resolu un <b>laboratoire de crackmes « expert »</b> dedie aux techniques anti-analyse — concus d'abord, casses ensuite, comme les deux precedents. Chaque binaire implemente une technique de detection reelle (celles utilisees par les packers et les malwares), chaque detection est <b>reactive</b> : etre detecte ne fait pas seulement sortir — ca <b>corrompt la cle de decryption en memoire</b>, si bien que meme le bon mot de passe affiche <code>FAIL</code>.</p>
+
+  <h3>Taxonomie des techniques implementees</h3>
+  <table class="tbl">
+    <thead><tr><th>Technique</th><th>Mecanisme</th><th>Reaction si detecte</th></tr></thead>
+    <tbody>
+      <tr><td><b>TracerPid en cascade</b></td><td><code>/proc/self/status</code> (couche 1) → fork + <code>PTRACE_ATTACH</code> du parent (couche 2, echoue si trace) → <code>PTRACE_TRACEME</code> apres validation (couche 3, bloque le tracing post-hoc)</td><td>Corruption de la cle XOR</td></tr>
+      <tr><td><b>VM custom 16-opcodes</b></td><td>Table de dispatch par pointeurs de fonction (pas de <code>switch</code>), bytecode XORe (cle <code>0x7F</code>) decrypte en heap a l'execution, validation entierement dans le bytecode ; strings construites sur la pile, rien en <code>.rodata</code></td><td>Cle <code>0x7F</code> → <code>0x80</code> si trace → bytecode informe</td></tr>
+      <tr><td><b>Verificateur de parent</b></td><td>Lit <code>/proc/self/stat</code> pour le PPID, puis <code>/proc/[ppid]/status</code> : le parent doit etre un shell interactif legitime (<code>bash</code>, <code>zsh</code>, <code>dash</code>) — un process lance depuis gdb a gdb comme parent</td><td>Sortie silencieuse</td></tr>
+      <tr><td><b>Scan W+X</b></td><td>Parse <code>/proc/self/maps</code> a la recherche de regions <b>writable ET executable</b> simultanement — signature de debuggers et d'injecteurs</td><td>Refus</td></tr>
+      <tr><td><b>Seccomp BPF</b></td><td>Filtre seccomp charge en mode <code>SECCOMP_RET_KILL</code> : le binaire verifie l'arch (<code>AUDIT_ARCH_X86_64</code>) et tue le process sur syscall interdit — le ptrace du debugger est arrete par le filtre lui-meme</td><td><code>SIGSYS</code> → mort du process</td></tr>
+      <tr><td><b>Scanner INT3</b></td><td>Timer temps reel (<code>setitimer</code>/<code>SIGALRM</code>) scanne periodiquement son propre <code>.text</code> a la recherche d'octets <code>0xCC</code> (breakpoints logiciels gdb), y compris le premier octet des prologues de fonctions critiques (<code>break functionname</code> pose un INT3 la)</td><td>Restaure l'octet depuis un snapshot de demarrage + corrompt les constantes du hash</td></tr>
+      <tr><td><b>Mirage de timing</b></td><td>Validation caractere par caractere, <code>nanosleep(200 us)</code> entre chaque, mesure via <code>clock_gettime</code> — sous debugger single-step, l'ecart reel >> 200 us</td><td>Flag errone silencieux</td></tr>
+      <tr><td><b>Labyrinthe memoire partagee</b></td><td>Les constantes du mixage (<code>0xDEAD</code>, <code>0xBEEF</code>, <code>0xCAFE</code>) vivent dans un <code>shm_open</code> + <code>mmap</code> ecrit par un <b>processus enfant</b> — rien dans le binaire ni dans ses segments</td><td>Depend de la presence du child</td></tr>
+      <tr><td><b>Verificateur de debug registers</b></td><td>Fork + <code>PTRACE_PEEKUSER</code> a l'offset DR6 : valeur propre = <code>0xFFFF0FF0</code> (aucun breakpoint materiel) ; tout autre bit = breakpoint DR0-DR3 actif — contourne les anti-anti-debug logiciels classiques</td><td>Refus</td></tr>
+      <tr><td><b>Detection LD_PRELOAD</b></td><td><code>getenv("LD_PRELOAD")</code> + scan <code>/proc/self/maps</code> pour des <code>.so</code> hors <code>/lib</code> et <code>/usr/lib</code> — la technique de bypass la plus courante des crackmes est elle-meme detectee</td><td>Refus</td></tr>
+      <tr><td><b>Timing vDSO</b></td><td><code>clock_gettime(CLOCK_MONOTONIC)</code> autour d'une boucle serree — le vDSO rend la mesure resistant aux hooks libc : il n'y a <b>pas de fonction a hooker</b>, le syscall est emule en espace utilisateur</td><td>Flag errone</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Pourquoi concevoir ces defenses change la facon de les contourner</h3>
+  <ul>
+    <li><b>La reactivite change tout</b> : un anti-debug qui <code>exit()</code> se NOP en deux instructions. Un anti-debug qui <b>corrupte sa propre cle</b> avant le compare force l'analyste a patcher <i>avant</i> que la detection ne tourne — pas apres. C'est le pattern <code>if (debugger) key ^= 0xFF;</code> vs. <code>if (debugger) exit(1);</code> — le premier est trivial a contourner, le second exige de comprendre l'ordre des operations.</li>
+    <li><b>La source du signal fait la difference</b> : TracerPid vient de <code>/proc</code> (hookable par <code>LD_PRELOAD</code> sur <code>open</code>), DR6 vient de <code>ptrace</code> (pas hookable — c'est un syscall), le timing vDSO ne passe <b>ni libc ni syscall visible</b>. Chaque couche supprime une famille de bypass.</li>
+    <li><b>Le processus enfant comme cache-cle</b> : stocker une partie du secret dans un process separe via memoire partagee rend l'analyse mono-processus (gdb par defaut) aveugle — le secret n'existe pas dans l'espace d'adresse observe.</li>
+    <li><b>Seccomp retourne l'arme</b> : le meme filtre qu'un sandboxing defensif utilise pour restreindre un process sert ici a <b>interdire au debugger</b> ses syscalls de tracing. Une defense n'est pas defensive par nature — c'est la position qui decide.</li>
+  </ul>
+
+  <div class="note">
+    <span class="lbl">Cadre</span>
+    Lab prive sur ma machine : binaires concus par moi, resolus par moi, sources dans le repo du lab pour verifier le ground truth apres chaque solve. Techniques inspirees de l'analyse de malwares reels — utilisees ici dans un contexte d'apprentissage et de conception de challenges, pas de distribution.
+  </div>
+
+  <!-- ================================================================ -->
   <!-- SECTION 04 — Hexgate CTF platform                               -->
   <!-- ================================================================ -->
 
@@ -721,6 +759,7 @@ echo <span class="st">'flag{wrong_flag_value}'</span> | ./crackme-v2     <span c
     <li><b>Exploitation binaire</b> : lecture de pile, contournement d'absence de protections, ret2win — et surtout la partie souvent oubliee : porter le bon <b>jeton d'acces</b> (le wrapper SSH) et gerer le <b>timing du pipe</b> pour ne pas perdre le shell.</li>
     <li><b>Anti-protection</b> : de-packing UPX, defaite d'anti-debug (<code>/proc/self/status</code> TracerPid via <code>open</code>/<code>read</code>/<code>strstr</code>/<code>strtol</code>, <code>PTRACE_TRACEME</code> via un seul syscall), desobfuscation de chaines XOR, reverse d'un hash Feistel maison, et reperage d'une <b>branche leurre</b>.</li>
     <li><b>Producteur autant que solveur</b> : je concois mes propres crackmes (design des couches de defense, choix des constantes, QA du ciphertext — y compris la correction d'un blob encode hallucine et d'une erreur de longueur dans la spec, verification des bornes et des blobs encodes par trois tests de build automatises) puis je les casse a froid. Les concevoir apprend autant que les resoudre — on comprend une protection en la construisant, et on calibre la difficulte en la cassant.</li>
+    <li><b>Laboratoire anti-analyse</b> : une serie de crackmes experts implementant les detections reelles (TracerPid en cascade, VM bytecode, scan W+X, seccomp BPF, scanner INT3, debug registers DR6, timing vDSO, secret en memoire partagee) — avec la regle de conception qui change tout : la detection <b>corrompt</b> au lieu d'exit, forçant l'analyste a patcher avant l'execution du check. Concevoir ces defenses est la meilleure preparation pour les defaire.</li>
     <li><b>Jusqu'a l'infra</b> : avec Hexgate, la meme exigence cote plateforme — auth bcrypt, JWT HS256, rate limiting par fenetre glissante, first-blood, scoreboard, 10 points de threat model documentes — livree avec son architecture, ses schemas SQLModel et son modele de menaces.</li>
     <li><b>Discipline de notes</b> : chaque cible a sa fiche (metadonnees, adresses cles, pieges, one-liner de recuperation). Le processus de QA (correction du blob encode, verification des 3 cas de test au build) fait partie de la livraison.</li>
   </ul>
